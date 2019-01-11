@@ -102,9 +102,9 @@ class Position:
     column: int = 1
 
     @staticmethod
-    def __add(lhs: int, rhs: int, min: int) -> int:
-        """Compute max(min, lhs+rhs) (provided min <= lhs)."""
-        return rhs + lhs if 0 < rhs or -rhs < lhs else min
+    def __add(lhs: int, rhs: int, min_v: int) -> int:
+        """Compute max(min_v, lhs+rhs) (provided min_v <= lhs)."""
+        return rhs + lhs if 0 < rhs or -rhs < lhs else min_v
 
     def lines(self, count: int = 1) -> Position:
         """(line related) Advance to the COUNT next lines."""
@@ -275,6 +275,7 @@ class Scanner:
         self.length = len(self.buffer)
         self.location = Location(filename)
 
+    # noinspection PyMethodParameters
     def __make_regex(patterns):
         regex_parts = []
         groups = {}
@@ -537,10 +538,10 @@ class Parser:
         """
         tok_name = self.consume(TokenID.Name)
         self.consume(TokenID.Colon)
-        type = self.parse_type()
+        param_type = self.parse_type()
 
         # noinspection PyArgumentList
-        return ParameterAST(name=tok_name.value, type=type, location=tok_name.location)
+        return ParameterAST(name=tok_name.value, type=param_type, location=tok_name.location)
 
     def parse_function_statement(self) -> Optional[StatementAST]:
         """
@@ -623,6 +624,8 @@ class Parser:
             Number
         """
         tok_number = self.consume(TokenID.Number)
+
+        # noinspection PyArgumentList
         return IntegerExpressionAST(value=int(tok_number.value), location=tok_number.location)
 
 
@@ -817,6 +820,7 @@ class SemanticModel:
     def annotate_symbol(self, node: NodeAST, parent: ContainerSymbol) -> Symbol:
         raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented member declaration")
 
+    # noinspection PyUnusedLocal
     @multimethod
     def annotate_symbol(self, node: ModuleAST, parent=None) -> Module:
         return Module(self.module_name, Location(node.location.filename))
@@ -1096,8 +1100,8 @@ class Function(Value, OwnedSymbol):
 
 
 class IntegerConstant(Value):
-    def __init__(self, type: IntegerType, value: int, location: Location):
-        super(IntegerConstant, self).__init__(type, location)
+    def __init__(self, value_type: IntegerType, value: int, location: Location):
+        super(IntegerConstant, self).__init__(value_type, location)
 
         self.value = value
 
@@ -1312,7 +1316,7 @@ def load_source_content(location: Location, before=2, after=2):
         return results
 
 
-def show_source_lines(location: Location, before=2, after=2, columns=None):
+def show_source_lines(location: Location, before=2, after=2):
     """
     Convert selected lines to error message, e.g.:
 
@@ -1322,7 +1326,6 @@ def show_source_lines(location: Location, before=2, after=2, columns=None):
     ```
     """
     stream = io.StringIO()
-    columns = columns or 80
 
     strings = load_source_content(location, before, after)
     if not strings:
@@ -1395,7 +1398,7 @@ def build(filenames: Sequence[str]):
         print(generator)
 
 
-def process_pdb(parser: argparse.ArgumentParser, action):
+def process_pdb(action):
     @functools.wraps(action)
     def wrapper(*args, **kwargs):
         try:
@@ -1461,6 +1464,7 @@ def main():
 
     key_level = '__level__'
     key_pdb = '__pdb__'
+    # noinspection PyProtectedMember
     logger_levels = list(map(str.lower, logging._nameToLevel.keys()))
     logger_default = "warning"
 
@@ -1477,7 +1481,7 @@ def main():
 
     action = build
     if is_pdb:  # enable pdb if required
-        action = process_pdb(parser, action)
+        action = process_pdb(action)
     action = process_errors(action)
     sys.exit(action(**kwargs) or 0)
 

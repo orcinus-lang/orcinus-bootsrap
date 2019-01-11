@@ -1,0 +1,6 @@
+# EXIT: 10
+def test() -> int:
+    return 10
+
+def main() -> int:
+    return test()

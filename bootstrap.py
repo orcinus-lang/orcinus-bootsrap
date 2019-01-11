@@ -8,10 +8,13 @@ import functools
 import io
 import itertools
 import logging
+import os
 import re
 import sys
 from dataclasses import dataclass
 from typing import Sequence, Iterator, Optional
+
+# from colorlog import ColoredFormatter
 
 APPLICATION_NAME = 'bootstrap'
 ANSI_COLOR_RED = "\033[31m" if sys.stderr.isatty() else ""
@@ -617,6 +620,70 @@ class PassStatementAST(StatementAST):
     pass
 
 
+class SemanticContext:
+    def __init__(self, paths=None):
+        if not paths:
+            paths = [
+                os.path.join(os.path.dirname(__file__), 'stdlib'),
+                os.getcwd()
+            ]
+        self.paths = paths
+
+    @staticmethod
+    def convert_module_name(filename, path):
+        fullname = os.path.abspath(filename)
+        if not fullname.startswith(path):
+            raise BootstrapError(f"Not found file `{filename}` in library path `{path}`")
+
+        module_name = fullname[len(path):]
+        module_name, _ = os.path.splitext(module_name)
+        module_name = module_name.strip(os.path.sep)
+        module_name = module_name.replace(os.path.sep, '.')
+        return module_name
+
+    @staticmethod
+    def convert_filename(module_name, path):
+        filename = module_name.replace('.', os.path.sep) + '.orx'
+        return os.path.join(path, filename)
+
+    def get_module_name(self, filename):
+        fullname = os.path.abspath(filename)
+        for path in self.paths:
+            if fullname.startswith(path):
+                return self.convert_module_name(fullname, path)
+
+        raise BootstrapError(f"Not found file `{filename}` in library paths")
+
+    def open(self, filename):
+        """ Open module from file """
+        module_name = self.get_module_name(filename)
+
+        with open(filename, 'r', encoding='utf8') as stream:
+            return self.__open_source(filename, module_name, stream)
+
+    def load(self, module_name):
+        for path in self.paths:
+            filename = self.convert_filename(module_name, path)
+            try:
+                with open(filename, 'r', encoding='utf8') as stream:
+                    return self.__open_source(filename, module_name, stream)
+            except IOError:
+                logger.info(f"Not found module `{module_name}` in file `{filename}`")
+                pass  # Continue
+
+        raise BootstrapError(f'Not found module {module_name}')
+
+    def __open_source(self, filename, module_name, stream):
+        logger.info(f"Open `{module_name}` from file `{filename}`")
+
+        parser = Parser(filename, stream)
+        tree = parser.parse()
+        self.__analyze(module_name, tree)
+
+    def __analyze(self, module_name, tree):
+        pass
+
+
 def load_source_content(location: Location, before=2, after=2):
     """ Load selected line and it's neighborhood lines """
     try:
@@ -702,11 +769,9 @@ def show_source_lines(location: Location, before=2, after=2, columns=None):
 
 
 def build(filenames: Sequence[str]):
+    context = SemanticContext()
     for filename in filenames:
-        with open(filename, 'r', encoding='utf8') as stream:
-            parser = Parser(filename, stream)
-            module = parser.parse()
-        print(module)
+        context.open(filename)
 
 
 def process_pdb(parser: argparse.ArgumentParser, action):
@@ -742,7 +807,42 @@ def process_errors(action):
     return wrapper
 
 
+def initialize_logging():
+    """ Prepare rules for loggers """
+    # Prepare console logger
+    console = logging.StreamHandler()
+
+    # # Prepare console formatter
+    # if sys.stderr.isatty():
+    #     formatter = ColoredFormatter(
+    #         '%(reset)s%(message_log_color)s%(message)s',
+    #         datefmt=None,
+    #         reset=True,
+    #         log_colors={
+    #             'DEBUG': 'cyan',
+    #             'INFO': 'green',
+    #             'WARNING': 'yellow',
+    #             'ERROR': 'red',
+    #             'CRITICAL': 'red',
+    #         },
+    #         secondary_log_colors={
+    #             'message': {
+    #                 'ERROR': 'red',
+    #                 'CRITICAL': 'red'
+    #             }
+    #         }
+    #     )
+    # else:
+    formatter = logging.Formatter('%(message)s')
+    console.setFormatter(formatter)
+
+    # Setup logging in console
+    logger.addHandler(console)
+
+
 def main():
+    initialize_logging()
+
     key_level = '__level__'
     key_pdb = '__pdb__'
     logger_levels = list(map(str.lower, logging._nameToLevel.keys()))

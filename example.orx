@@ -1,5 +1,2 @@
-def A:
-    (
-        1,
-        2
-    )
+def main(args: name) -> int:
+    pass

@@ -11,7 +11,7 @@ import logging
 import re
 import sys
 from dataclasses import dataclass
-from typing import Sequence, Iterator
+from typing import Sequence, Iterator, Optional
 
 APPLICATION_NAME = 'bootstrap'
 ANSI_COLOR_RED = "\033[31m" if sys.stderr.isatty() else ""
@@ -60,6 +60,8 @@ class TokenID(enum.IntEnum):
     Import = enum.auto()
     From = enum.auto()
     As = enum.auto()
+    Then = enum.auto()
+    Ellipsis = enum.auto()
 
 
 @dataclass
@@ -223,10 +225,12 @@ class Scanner:
 
         (r'\(', TokenID.LeftParenthesis),
         (r'\)', TokenID.RightParenthesis),
+        (r'\.\.\.', TokenID.Ellipsis),
         (r'\.', TokenID.Dot),
         (r',', TokenID.Comma),
         (r':', TokenID.Colon),
         (r';', TokenID.Semicolon),
+        (r'\-\>', TokenID.Then),
 
         (r'\n', TokenID.NewLine),
         (r'\r\n', TokenID.NewLine),
@@ -370,6 +374,249 @@ class Scanner:
         return self.tokenize()
 
 
+class Parser:
+    def __init__(self, filename, stream):
+        self.tokens = list(Scanner(filename, stream))
+        self.index = 0
+
+    @property
+    def current_token(self) -> Token:
+        return self.tokens[self.index]
+
+    def match(self, *indexes: TokenID) -> bool:
+        """
+        Match current token
+
+        :param indexes:     Token identifiers
+        :return: True, if current token is matched passed identifiers
+        """
+        return self.current_token.id in indexes
+
+    def consume(self, *indexes: TokenID) -> Token:
+        """
+        Consume current token
+
+        :param indexes:     Token identifiers
+        :return: Return consumed token
+        :raise Diagnostic if current token is not matched passed identifiers
+        """
+        if not indexes or self.match(*indexes):
+            token = self.current_token
+            self.index += 1
+            return token
+
+        # generate exception message
+        existed_name = self.current_token.id.name
+        if len(indexes) > 1:
+            required_names = ', '.join(f'`{x.name}`' for x in indexes)
+            message = f"Required one of {required_names}, but got `{existed_name}`"
+        else:
+            required_name = indexes[0].name
+            message = f"Required `{required_name}`, but got `{existed_name}`"
+        raise Diagnostic(self.current_token.location, DiagnosticSeverity.Error, message)
+
+    def try_consume(self, *indexes: TokenID) -> bool:
+        """
+        Try consume current token
+
+        :param indexes:     Token identifiers
+        :return: True, if current token is matched passed identifiers
+        """
+        if not self.match(*indexes):
+            return False
+
+        self.consume(*indexes)
+        return True
+
+    def parse(self) -> ModuleAST:
+        """
+        Parse module from source
+
+        module:
+            members EndFile
+        """
+        location = self.tokens[0].location + self.tokens[-1].location
+        members = self.parse_members()
+        self.consume(TokenID.EndFile)
+
+        # noinspection PyArgumentList
+        return ModuleAST(members=members, location=location)
+
+    def parse_type(self) -> TypeAST:
+        """
+        type:
+            name
+        """
+        tok_name = self.consume(TokenID.Name)
+
+        # noinspection PyArgumentList
+        return NamedTypeAST(name=tok_name.value, location=tok_name.location)
+
+    def parse_members(self) -> Sequence[MemberAST]:
+        """
+        members:
+            { member }
+        """
+        members = []
+        while self.match(TokenID.Def):
+            members.append(self.parse_member())
+        return tuple(members)
+
+    def parse_member(self) -> MemberAST:
+        """
+        member:
+            function
+        """
+        if self.match(TokenID.Def):
+            return self.parse_function()
+
+        raise NotImplementedError
+
+    def parse_function(self) -> FunctionAST:
+        """
+        function:
+            'def' Name '(' parameters ')' [ '->' type ] ':' NewLine function_statement
+        """
+        self.consume(TokenID.Def)
+        tok_name = self.consume(TokenID.Name)
+        self.consume(TokenID.LeftParenthesis)
+        parameters = self.parse_parameters()
+        self.consume(TokenID.RightParenthesis)
+        if self.try_consume(TokenID.Then):
+            return_type = self.parse_type()
+        else:
+            # noinspection PyArgumentList
+            return_type = NamedTypeAST(name='void', location=tok_name.location)
+        self.consume(TokenID.Colon)
+        statement = self.parse_function_statement()
+
+        # noinspection PyArgumentList
+        return FunctionAST(
+            name=tok_name.value,
+            parameters=parameters,
+            return_type=return_type,
+            statement=statement,
+            location=tok_name.location
+        )
+
+    def parse_parameters(self) -> Sequence[ParameterAST]:
+        """
+        parameters:
+            [ parameter { ',' parameter } ]
+        """
+        parameters = []
+        if self.match(TokenID.Name):
+            parameters.append(self.parse_parameter())
+            while self.try_consume(TokenID.Comma):
+                parameters.append(self.parse_parameter())
+
+        return tuple(parameters)
+
+    def parse_parameter(self) -> ParameterAST:
+        """
+        parameter:
+            Name ':' type
+        """
+        tok_name = self.consume(TokenID.Name)
+        self.consume(TokenID.Colon)
+        type = self.parse_type()
+
+        # noinspection PyArgumentList
+        return ParameterAST(name=tok_name.value, type=type, location=tok_name.location)
+
+    def parse_function_statement(self) -> Optional[StatementAST]:
+        """
+        function_statement:
+            '...' EndFile
+            NewLine block_statement
+        """
+        if self.try_consume(TokenID.Ellipsis):
+            return None
+
+        self.consume(TokenID.NewLine)
+        return self.parse_block_statement()
+
+    def parse_block_statement(self) -> StatementAST:
+        """
+        block_statement:
+            Indent statement { statement } Undent
+        """
+        self.consume(TokenID.Indent)
+        statements = [self.parse_statement()]
+        while self.match(TokenID.Pass):
+            statements.append(self.parse_statement())
+        self.consume(TokenID.Undent)
+        location = statements[0].location + statements[-1].location
+
+        # noinspection PyArgumentList
+        return BlockStatementAST(statements=tuple(statements), location=location)
+
+    def parse_statement(self) -> StatementAST:
+        """
+        statement:
+            'pass'
+        """
+        tok_pass = self.consume(TokenID.Pass)
+        self.consume(TokenID.NewLine)
+
+        # noinspection PyArgumentList
+        return PassStatementAST(location=tok_pass.location)
+
+
+@dataclass
+class NodeAST:
+    location: Location
+
+
+@dataclass
+class ModuleAST(NodeAST):
+    members: Sequence[MemberAST]
+
+
+@dataclass
+class TypeAST(NodeAST):
+    pass
+
+
+@dataclass
+class NamedTypeAST(TypeAST):
+    name: str
+
+
+@dataclass
+class MemberAST(TypeAST):
+    pass
+
+
+@dataclass
+class ParameterAST(NodeAST):
+    name: str
+    type: TypeAST
+
+
+@dataclass
+class FunctionAST(MemberAST):
+    name: str
+    parameters: Sequence[ParameterAST]
+    return_type: TypeAST
+    statement: Optional[StatementAST]
+
+
+@dataclass
+class StatementAST(NodeAST):
+    pass
+
+
+@dataclass
+class BlockStatementAST(StatementAST):
+    statements: Sequence[StatementAST]
+
+
+@dataclass
+class PassStatementAST(StatementAST):
+    pass
+
+
 def load_source_content(location: Location, before=2, after=2):
     """ Load selected line and it's neighborhood lines """
     try:
@@ -457,11 +704,9 @@ def show_source_lines(location: Location, before=2, after=2, columns=None):
 def build(filenames: Sequence[str]):
     for filename in filenames:
         with open(filename, 'r', encoding='utf8') as stream:
-            scanner = Scanner(filename, stream)
-            tokens = list(scanner)
-
-        for token in tokens:
-            print(token)
+            parser = Parser(filename, stream)
+            module = parser.parse()
+        print(module)
 
 
 def process_pdb(parser: argparse.ArgumentParser, action):

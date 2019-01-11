@@ -391,7 +391,7 @@ class Scanner:
 
 
 class Parser:
-    EXPRESSION_STARTS = (TokenID.Number,)
+    EXPRESSION_STARTS = (TokenID.Number, TokenID.Name, TokenID.LeftParenthesis)
     STATEMENT_STARTS = (TokenID.Pass, TokenID.Return) + EXPRESSION_STARTS
 
     def __init__(self, filename, stream):
@@ -586,7 +586,7 @@ class Parser:
 
         self.consume(*self.STATEMENT_STARTS)
 
-    def parse_pass_statement(self):
+    def parse_pass_statement(self) -> StatementAST:
         """ pass_statement: pass """
         tok_pass = self.consume(TokenID.Pass)
         self.consume(TokenID.NewLine)
@@ -594,7 +594,7 @@ class Parser:
         # noinspection PyArgumentList
         return PassStatementAST(location=tok_pass.location)
 
-    def parse_return_statement(self):
+    def parse_return_statement(self) -> StatementAST:
         """
         return_statement
             'return' [ expression ]
@@ -606,19 +606,56 @@ class Parser:
         # noinspection PyArgumentList
         return ReturnStatementAST(value=value, location=tok_return.location)
 
-    def parse_expression_statement(self):
+    def parse_expression_statement(self) -> StatementAST:
         raise NotImplementedError
 
-    def parse_expression(self):
+    def parse_arguments(self) -> Sequence[ExpressionAST]:
+        """
+        arguments:
+            [ expression { ',' expression } [','] ]
+        """
+        if not self.match(*self.EXPRESSION_STARTS):
+            return tuple()
+
+        arguments = [self.parse_expression()]
+        while self.match(TokenID.Comma):
+            self.consume(TokenID.Comma)
+            if self.match(*self.EXPRESSION_STARTS):
+                arguments.append(self.parse_expression())
+            else:
+                break
+
+        return tuple(arguments)
+
+    def parse_expression(self) -> ExpressionAST:
         """
         expression:
-            number
+            atom
+        """
+        return self.parse_atom_expression()
+
+    def parse_atom_expression(self) -> ExpressionAST:
+        """
+        atom:
+             number_expression
+             name_expression
+             call_expression
+             parenthesis_expression
         """
         if self.match(TokenID.Number):
-            return self.parse_number_expression()
-        self.consume(*self.EXPRESSION_STARTS)
+            atom = self.parse_number_expression()
+        elif self.match(TokenID.Name):
+            atom = self.parse_name_expression()
+        elif self.match(TokenID.LeftParenthesis):
+            atom = self.parse_parenthesis_expression()
+        else:
+            self.match(*self.EXPRESSION_STARTS)
 
-    def parse_number_expression(self):
+        if self.match(TokenID.LeftParenthesis):
+            return self.parse_call_expression(atom)
+        return atom
+
+    def parse_number_expression(self) -> ExpressionAST:
         """
         number:
             Number
@@ -627,6 +664,39 @@ class Parser:
 
         # noinspection PyArgumentList
         return IntegerExpressionAST(value=int(tok_number.value), location=tok_number.location)
+
+    def parse_name_expression(self) -> ExpressionAST:
+        """
+        name:
+            Name
+        """
+        tok_name = self.consume(TokenID.Name)
+
+        # noinspection PyArgumentList
+        return NamedExpressionAST(name=tok_name.value, location=tok_name.location)
+
+    def parse_call_expression(self, value: ExpressionAST) -> ExpressionAST:
+        """
+        call_expression
+            expression '(' arguments ')'
+        """
+        self.consume(TokenID.LeftParenthesis)
+        arguments = self.parse_arguments()
+        tok_close = self.consume(TokenID.RightParenthesis)
+        location = value.location + tok_close.location
+
+        # noinspection PyArgumentList
+        return CallExpressionAST(value=value, arguments=arguments, location=location)
+
+    def parse_parenthesis_expression(self) -> ExpressionAST:
+        """
+        parenthesis_expression:
+            '(' expression ')'
+        """
+        self.consume(TokenID.LeftParenthesis)
+        expression = self.parse_expression()
+        self.consume(TokenID.RightParenthesis)
+        return expression
 
 
 @dataclass(unsafe_hash=True, frozen=True)
@@ -694,8 +764,19 @@ class ExpressionAST(NodeAST):
 
 
 @dataclass(unsafe_hash=True, frozen=True)
-class IntegerExpressionAST(NodeAST):
+class IntegerExpressionAST(ExpressionAST):
     value: int
+
+
+@dataclass(unsafe_hash=True, frozen=True)
+class NamedExpressionAST(ExpressionAST):
+    name: str
+
+
+@dataclass(unsafe_hash=True, frozen=True)
+class CallExpressionAST(ExpressionAST):
+    value: ExpressionAST
+    arguments: Sequence[ExpressionAST]
 
 
 class SemanticContext:
@@ -874,12 +955,15 @@ class SemanticModel:
 
     @multimethod
     def emit_value(self, node: ExpressionAST) -> Value:
-        raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented statement emitting")
+        raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented value emitting")
 
     @multimethod
-    def emit_value(self, node: IntegerExpressionAST) -> IntegerConstant:
+    def emit_value(self, node: IntegerExpressionAST) -> Value:
         return IntegerConstant(IntegerType(self.module, node.location), node.value, node.location)
 
+    @multimethod
+    def emit_value(self, node: CallExpressionAST) -> Value:
+        # value = self.emit_value(node.value)
 
 class Symbol(abc.ABC):
     """ Abstract base for all symbols """

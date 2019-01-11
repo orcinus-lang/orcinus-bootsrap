@@ -34,7 +34,6 @@ def execute(command, *, input=None, is_binary=False):
         stdout, stderr = stdout.decode('utf-8').rstrip(), stderr.decode('utf-8').rstrip()
     if process.returncode:
         error = stderr if isinstance(stderr, str) else stderr.decode('utf-8')
-        print(error, file=sys.stderr)
     return process.returncode, stdout, stderr
 
 
@@ -69,7 +68,7 @@ def compile_and_execute(filename, *, name, opt_level, arguments, input=None):
     # orcinus - generate LLVM IR
     code, assembly, stderr = execute([PYTHON_EXECUTABLE, BOOTSTRAP_SCRIPT, filename], is_binary=True)
     if code:
-        return False, code, assembly, stderr
+        return False, code, assembly, stderr.decode('utf-8').rstrip()
 
     # lli-6.0 - compile LLVM IR and execute
     flags = [
@@ -83,7 +82,7 @@ def compile_and_execute(filename, *, name, opt_level, arguments, input=None):
 
 def remove_startswith_and_strip(haystack: str, needle: str) -> str:
     if haystack.startswith(needle):
-        return haystack[len(needle) + 1:].strip()
+        return haystack[len(needle):]
     return ""
 
 
@@ -110,32 +109,32 @@ def source_cases(request):
 
     with open(fullname, 'r', encoding='utf-8') as stream:
         for line in stream:
-            line = remove_startswith_and_strip(line, '#')
+            line = remove_startswith_and_strip(line, '#').strip()
             if not line:
                 continue
 
             # warning
-            test_msg = remove_startswith_and_strip(line, "WARNING:")
+            test_msg = remove_startswith_and_strip(line, "WARNING: ")
             if test_msg:
-                warnings_list.append(test_msg)
+                warnings_list.append(test_msg.strip())
 
             # exit code
-            test_msg = remove_startswith_and_strip(line, "EXIT:")
+            test_msg = remove_startswith_and_strip(line, "EXIT: ")
             if test_msg:
-                result_code = int(test_msg)
+                result_code = int(test_msg.strip())
 
             # argument
-            test_msg = remove_startswith_and_strip(line, "ARG:")
+            test_msg = remove_startswith_and_strip(line, "ARG: ")
             if test_msg:
-                arguments.append(test_msg)
+                arguments.append(test_msg.strip())
 
             # input
-            test_msg = remove_startswith_and_strip(line, "INPUT:")
+            test_msg = remove_startswith_and_strip(line, "INPUT: ")
             if test_msg:
                 inputs.append(test_msg)
 
             # output
-            test_msg = remove_startswith_and_strip(line, "OUTPUT:")
+            test_msg = remove_startswith_and_strip(line, "OUTPUT: ")
             if test_msg:
                 outputs.append(test_msg)
 
@@ -145,9 +144,9 @@ def source_cases(request):
                 errors.append(test_msg)
 
     # Defaults
-    input_string = "\n".join(inputs)
-    output_string = "\n".join(outputs)
-    error_string = "\n".join(errors)
+    input_string = "\n".join(inputs) if inputs else None
+    output_string = "\n".join(outputs) if outputs else None
+    error_string = "\n".join(errors) if errors else None
 
     return fixture, fullname, warnings_list, arguments, input_string, output_string, error_string, result_code
 
@@ -166,6 +165,6 @@ def test_compile_and_execution(source_cases):
         if expected_code is not None:
             assert result_code == expected_code
         if expected_error is not None:
-            assert result_error == expected_error
+            assert expected_error in result_error
         if expected_output is not None:
-            assert result_output == expected_output
+            assert expected_output in result_output

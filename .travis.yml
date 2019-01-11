@@ -10,7 +10,7 @@ install:
 addons:
   apt:
     sources:
-      - lvm-toolchain-xenial-6.0
+      - llvm-toolchain-xenial-6.0
       - ubuntu-toolchain-r-test
     packages:
       - llvm-6.0

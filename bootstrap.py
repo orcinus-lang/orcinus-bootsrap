@@ -1,4 +1,8 @@
-#!/usr/bin/env python3.7
+#!/usr/bin/env python
+# Copyright (C) 2018 Vasiliy Sheredeko
+#
+# This software may be modified and distributed under the terms
+# of the MIT license.  See the LICENSE file for details.
 from __future__ import annotations
 
 import abc
@@ -1036,7 +1040,7 @@ class ModuleCodegen:
         llvm_return = self.llvm_types[func.return_type]
         llvm_params = [self.llvm_types[param.type] for param in func.parameters]
         llvm_type = ir.FunctionType(llvm_return, llvm_params)
-        llvm_func = ir.Function(self.llvm_module, llvm_type, func.name)
+        llvm_func = ir.Function(self.llvm_module, llvm_type, f'ORX_{func.name}')
 
         for llvm_arg, param in zip(llvm_func.args, func.parameters):
             llvm_arg.name = param.name
@@ -1048,7 +1052,42 @@ class ModuleCodegen:
             self.emit_function(func)
 
     def emit_function(self, func: Function):
-        return self.llvm_functions[func]
+        llvm_func = self.llvm_functions[func]
+        if func.name == 'main':
+            self.emit_main(func)
+        return llvm_func
+
+    def emit_main(self, func: Function):
+        # main prototype
+        llvm_type = ir.FunctionType(ir.IntType(32), [
+            ir.IntType(32),
+            ir.IntType(8).as_pointer().as_pointer()
+        ])
+        llvm_func = ir.Function(self.llvm_module, llvm_type, name="main")
+
+        argc, argv = llvm_func.args
+        argc.name, argv.name = 'argc', 'argv'
+
+        llvm_entry = llvm_func.append_basic_block('entry')
+        llvm_builder = ir.IRBuilder(llvm_entry)
+
+        if func.parameters:
+            raise Diagnostic(func.location, DiagnosticSeverity.Error, f"Main function must have zero arguments")
+        else:
+            arguments = []
+        llvm_result = llvm_builder.call(self.llvm_functions[func], arguments)
+
+        if not isinstance(func.return_type, (VoidType, IntegerType)):
+            raise Diagnostic(func.location, DiagnosticSeverity.Error,
+                             f"Return type of main function must be ‘int’ or ‘void’")
+        elif isinstance(func.return_type, VoidType):
+            llvm_result = ir.Constant(ir.IntType(32), 0)
+
+        if llvm_result.type.width > 32:
+            llvm_result = llvm_builder.trunc(llvm_result, ir.IntType(32))
+        elif llvm_result.type.width < 32:
+            llvm_result = llvm_builder.sext(llvm_result, ir.IntType(32))
+        llvm_builder.ret(llvm_result)
 
 
 def load_source_content(location: Location, before=2, after=2):

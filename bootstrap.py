@@ -16,6 +16,9 @@ from dataclasses import dataclass
 from typing import Sequence, Iterator, Optional, cast
 
 from colorlog import ColoredFormatter
+from llvmlite import binding
+from llvmlite import ir
+from multidict import MultiDict
 from multimethod import multimethod
 
 APPLICATION_NAME = 'bootstrap'
@@ -698,6 +701,8 @@ class SemanticModel:
         self.module_name = module_name
         self.tree = tree
         self.symbols = {}
+        self.types = []
+        self.functions = []
 
     @property
     def module(self) -> Module:
@@ -709,6 +714,11 @@ class SemanticModel:
     def declare_symbol(self, node: NodeAST, parent: ContainerSymbol = None):
         symbol = self.annotate_symbol(node, parent)
         self.symbols[node] = symbol
+
+        if isinstance(symbol, Type):
+            self.types.append(symbol)
+        elif isinstance(symbol, Function):
+            self.functions.append(symbol)
 
         if hasattr(node, 'members'):
             for child in node.members:
@@ -965,6 +975,82 @@ class Function(Value, OwnedSymbol):
         return f'{self.name}({parameters}) -> {self.return_type}'
 
 
+class LazyDict(dict):
+    def __init__(self, seq=None, *, builder, initializer=None, **kwargs):
+        super().__init__(seq or (), **kwargs)
+        self.__builder = builder
+        self.__initializer = initializer or (lambda x: None)
+
+    def __getitem__(self, item):
+        try:
+            return super().__getitem__(item)
+        except KeyError:
+            value = self.__builder(item)
+            if value is None:
+                raise KeyError(item)
+            self[item] = value
+            self.__initializer(item)
+            return value
+
+    def __contains__(self, item):
+        try:
+            self[item]
+        except KeyError:
+            return False
+        return True
+
+
+class ModuleCodegen:
+    def __init__(self, name='<stdin>'):
+        self.llvm_module = ir.Module(name)
+        self.llvm_module.triple = binding.Target.from_default_triple().triple
+
+        # names to symbol
+        self.types = {}
+        self.functions = MultiDict()
+
+        # symbol to llvm
+        self.llvm_types = LazyDict(builder=self.declare_type)
+        self.llvm_functions = LazyDict(builder=self.declare_function)
+
+    def __str__(self):
+        return str(self.llvm_module)
+
+    @multimethod
+    def declare_type(self, type_symbol: Type):
+        raise Diagnostic(type_symbol.location, DiagnosticSeverity.Error, "Not implemented type conversion to LLVM")
+
+    @multimethod
+    def declare_type(self, _: VoidType):
+        return ir.VoidType()
+
+    @multimethod
+    def declare_type(self, _: BooleanType):
+        return ir.IntType(1)
+
+    @multimethod
+    def declare_type(self, _: IntegerType):
+        return ir.IntType(64)
+
+    def declare_function(self, func: Function):
+        llvm_return = self.llvm_types[func.return_type]
+        llvm_params = [self.llvm_types[param.type] for param in func.parameters]
+        llvm_type = ir.FunctionType(llvm_return, llvm_params)
+        llvm_func = ir.Function(self.llvm_module, llvm_type, func.name)
+
+        for llvm_arg, param in zip(llvm_func.args, func.parameters):
+            llvm_arg.name = param.name
+
+        return llvm_func
+
+    def emit(self, model: SemanticModel):
+        for func in model.functions:
+            self.emit_function(func)
+
+    def emit_function(self, func: Function):
+        return self.llvm_functions[func]
+
+
 def load_source_content(location: Location, before=2, after=2):
     """ Load selected line and it's neighborhood lines """
     try:
@@ -1050,10 +1136,20 @@ def show_source_lines(location: Location, before=2, after=2, columns=None):
 
 
 def build(filenames: Sequence[str]):
+    # initialize llvm targets
+    binding.initialize()
+    binding.initialize_native_target()
+    binding.initialize_native_asmparser()
+    binding.initialize_native_asmprinter()
+
+    # initialize semantic context
     context = SemanticContext()
     for filename in filenames:
         model = context.open(filename)
-        print()
+
+        generator = ModuleCodegen(model.module.name)
+        generator.emit(model)
+        print(generator)
 
 
 def process_pdb(parser: argparse.ArgumentParser, action):

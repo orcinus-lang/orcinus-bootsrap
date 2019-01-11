@@ -1,2 +1,2 @@
-def main(args: name) -> int:
+def test(arg: int) -> void:
     pass

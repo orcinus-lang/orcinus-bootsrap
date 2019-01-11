@@ -1,6 +1,7 @@
 #!/usr/bin/env python3.7
 from __future__ import annotations
 
+import abc
 import argparse
 import collections
 import enum
@@ -12,9 +13,10 @@ import os
 import re
 import sys
 from dataclasses import dataclass
-from typing import Sequence, Iterator, Optional
+from typing import Sequence, Iterator, Optional, cast
 
-# from colorlog import ColoredFormatter
+from colorlog import ColoredFormatter
+from multimethod import multimethod
 
 APPLICATION_NAME = 'bootstrap'
 ANSI_COLOR_RED = "\033[31m" if sys.stderr.isatty() else ""
@@ -83,7 +85,7 @@ class Token:
         return str(self)
 
 
-@dataclass(order=True)
+@dataclass(order=True, unsafe_hash=True, frozen=True)
 class Position:
     # Line position in a document (one-based).
     line: int = 1
@@ -112,7 +114,7 @@ class Position:
         return f"{self.line}:{self.column}"
 
 
-@dataclass
+@dataclass(unsafe_hash=True, frozen=True)
 class Location:
     # The location's filename
     filename: str
@@ -566,38 +568,38 @@ class Parser:
         return PassStatementAST(location=tok_pass.location)
 
 
-@dataclass
+@dataclass(unsafe_hash=True, frozen=True)
 class NodeAST:
     location: Location
 
 
-@dataclass
+@dataclass(unsafe_hash=True, frozen=True)
 class ModuleAST(NodeAST):
     members: Sequence[MemberAST]
 
 
-@dataclass
+@dataclass(unsafe_hash=True, frozen=True)
 class TypeAST(NodeAST):
     pass
 
 
-@dataclass
+@dataclass(unsafe_hash=True, frozen=True)
 class NamedTypeAST(TypeAST):
     name: str
 
 
-@dataclass
-class MemberAST(TypeAST):
+@dataclass(unsafe_hash=True, frozen=True)
+class MemberAST(NodeAST):
     pass
 
 
-@dataclass
+@dataclass(unsafe_hash=True, frozen=True)
 class ParameterAST(NodeAST):
     name: str
     type: TypeAST
 
 
-@dataclass
+@dataclass(unsafe_hash=True, frozen=True)
 class FunctionAST(MemberAST):
     name: str
     parameters: Sequence[ParameterAST]
@@ -605,17 +607,17 @@ class FunctionAST(MemberAST):
     statement: Optional[StatementAST]
 
 
-@dataclass
+@dataclass(unsafe_hash=True, frozen=True)
 class StatementAST(NodeAST):
     pass
 
 
-@dataclass
+@dataclass(unsafe_hash=True, frozen=True)
 class BlockStatementAST(StatementAST):
     statements: Sequence[StatementAST]
 
 
-@dataclass
+@dataclass(unsafe_hash=True, frozen=True)
 class PassStatementAST(StatementAST):
     pass
 
@@ -628,6 +630,8 @@ class SemanticContext:
                 os.getcwd()
             ]
         self.paths = paths
+        self.modules = {}
+        self.filenames = {}
 
     @staticmethod
     def convert_module_name(filename, path):
@@ -676,12 +680,289 @@ class SemanticContext:
     def __open_source(self, filename, module_name, stream):
         logger.info(f"Open `{module_name}` from file `{filename}`")
 
+        if module_name in self.modules:
+            return self.modules[module_name]
+
         parser = Parser(filename, stream)
         tree = parser.parse()
-        self.__analyze(module_name, tree)
 
-    def __analyze(self, module_name, tree):
-        pass
+        model = SemanticModel(self, module_name, tree)
+        self.modules[module_name] = self.filenames[filename] = model
+        model.analyze()
+        return model
+
+
+class SemanticModel:
+    def __init__(self, context: SemanticContext, module_name: str, tree: ModuleAST):
+        self.context = context
+        self.module_name = module_name
+        self.tree = tree
+        self.symbols = {}
+
+    @property
+    def module(self) -> Module:
+        return self.symbols[self.tree]
+
+    def analyze(self):
+        self.declare_symbol(self.tree)
+
+    def declare_symbol(self, node: NodeAST, parent: ContainerSymbol = None):
+        symbol = self.annotate_symbol(node, parent)
+        self.symbols[node] = symbol
+
+        if hasattr(node, 'members'):
+            for child in node.members:
+                child_symbol = self.declare_symbol(child, symbol)
+                symbol.add_member(child_symbol)
+
+        return symbol
+
+    @multimethod
+    def resolve_type(self, node: TypeAST) -> Type:
+        raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented type resolving")
+
+    @multimethod
+    def resolve_type(self, node: NamedTypeAST) -> Type:
+        if node.name == 'void':
+            return VoidType(self.module, node.location)
+        elif node.name == 'bool':
+            return BooleanType(self.module, node.location)
+        elif node.name == 'int':
+            return IntegerType(self.module, node.location)
+
+        raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented type resolving")
+
+    @multimethod
+    def annotate_symbol(self, node: NodeAST, parent: ContainerSymbol) -> Symbol:
+        raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented member declaration")
+
+    @multimethod
+    def annotate_symbol(self, node: ModuleAST, parent=None) -> Module:
+        return Module(self.module_name, Location(node.location.filename))
+
+    @multimethod
+    def annotate_symbol(self, node: FunctionAST, parent: ContainerSymbol) -> Function:
+        parameters = [self.resolve_type(param.type) for param in node.parameters]
+        return_type = self.resolve_type(node.return_type)
+        func_type = FunctionType(self.module, parameters, return_type, node.location)
+        func = Function(parent, node.name, func_type, node.location)
+
+        for node_param, func_param in zip(node.parameters, func.parameters):
+            func_param.name = node_param.name
+            func_param.location = node_param.location
+
+            self.symbols[node_param] = func_param
+
+        return func
+
+
+class Symbol(abc.ABC):
+    """ Abstract base for all symbols """
+
+    @property
+    @abc.abstractmethod
+    def location(self) -> Location:
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def __str__(self):
+        raise NotImplementedError
+
+    def __repr__(self):
+        class_name = type(self).__name__
+        return f'<{class_name}: {self}>'
+
+
+class NamedSymbol(Symbol, abc.ABC):
+    """ Abstract base for all named symbols """
+
+    @property
+    @abc.abstractmethod
+    def name(self) -> str:
+        raise NotImplementedError
+
+    def __str__(self):
+        return self.name
+
+
+class OwnedSymbol(NamedSymbol, abc.ABC):
+    """ Abstract base for all owned symbols """
+
+    @property
+    @abc.abstractmethod
+    def owner(self) -> ContainerSymbol:
+        raise NotImplementedError
+
+    @property
+    def module(self) -> Module:
+        if isinstance(self.owner, Module):
+            return cast(Module, self.owner)
+        return cast(OwnedSymbol, self.owner).module
+
+
+class ContainerSymbol(Symbol, abc.ABC):
+    """ Abstract base for container symbols """
+
+    def __init__(self):
+        self.__members = []
+
+    @property
+    def members(self) -> Sequence[OwnedSymbol]:
+        return self.__members
+
+    def add_member(self, symbol: OwnedSymbol):
+        self.__members.append(symbol)
+
+
+class Value(Symbol, abc.ABC):
+    """ Abstract base for all values """
+
+    def __init__(self, value_type: Type, location: Location):
+        self.__location = location
+        self.__type = value_type
+
+    @property
+    def type(self) -> Type:
+        return self.__type
+
+    @property
+    def location(self) -> Location:
+        return self.__location
+
+    @location.setter
+    def location(self, value: Location):
+        self.__location = locals()
+
+
+class Module(NamedSymbol, ContainerSymbol):
+    def __init__(self, name, location: Location):
+        super(Module, self).__init__()
+
+        self.__name = name
+        self.__location = location
+
+    @property
+    def name(self) -> str:
+        return self.__name
+
+    @property
+    def location(self) -> Location:
+        return self.__location
+
+
+class Type(OwnedSymbol, ContainerSymbol, abc.ABC):
+    """ Abstract base for all types """
+
+    def __init__(self, owner: ContainerSymbol, name: str, location: Location):
+        super(Type, self).__init__()
+
+        self.__owner = owner
+        self.__name = name
+        self.__location = location
+
+    @property
+    def owner(self) -> ContainerSymbol:
+        return self.__owner
+
+    @property
+    def name(self) -> str:
+        return self.__name
+
+    @property
+    def location(self) -> Location:
+        return self.__location
+
+
+class VoidType(Type):
+    def __init__(self, owner: ContainerSymbol, location: Location):
+        super(VoidType, self).__init__(owner, 'void', location)
+
+
+class BooleanType(Type):
+    def __init__(self, owner: ContainerSymbol, location: Location):
+        super(BooleanType, self).__init__(owner, 'bool', location)
+
+
+class IntegerType(Type):
+    def __init__(self, owner: ContainerSymbol, location: Location):
+        super(IntegerType, self).__init__(owner, 'int', location)
+
+
+class FunctionType(Type):
+    def __init__(self, owner: ContainerSymbol, parameters: Sequence[Type], return_type: Type, location: Location):
+        super(FunctionType, self).__init__(owner, "Function", location)
+
+        self.__return_type = return_type
+        self.__parameters = parameters
+
+    @property
+    def return_type(self) -> Type:
+        return self.__return_type
+
+    @property
+    def parameters(self) -> Sequence[Type]:
+        return self.__parameters
+
+    def __str__(self):
+        parameters = ', '.join(str(param_type) for param_type in self.parameters)
+        return f"({parameters}) -> {self.return_type}"
+
+
+class Parameter(Value, OwnedSymbol):
+    def __init__(self, owner: Function, name: str, param_type: Type):
+        super(Parameter, self).__init__(param_type, owner.location)
+
+        self.__owner = owner
+        self.__name = name
+
+    @property
+    def owner(self) -> Function:
+        return self.__owner
+
+    @property
+    def name(self) -> str:
+        return self.__name
+
+    @name.setter
+    def name(self, value: str):
+        self.__name = value
+
+    def __str__(self):
+        return f'{self.name}: {self.type}'
+
+
+class Function(Value, OwnedSymbol):
+    def __init__(self, owner: ContainerSymbol, name: str, func_type: FunctionType, location: Location):
+        super(Function, self).__init__(func_type, location)
+        self.__owner = owner
+        self.__name = name
+        self.__parameters = [
+            Parameter(self, f'arg{idx}', param_type) for idx, param_type in enumerate(func_type.parameters)
+        ]
+
+    @property
+    def owner(self) -> ContainerSymbol:
+        return self.__owner
+
+    @property
+    def name(self) -> str:
+        return self.__name
+
+    @property
+    def function_type(self) -> FunctionType:
+        return cast(FunctionType, self.type)
+
+    @property
+    def parameters(self) -> Sequence[Parameter]:
+        return self.__parameters
+
+    @property
+    def return_type(self) -> Type:
+        return self.function_type.return_type
+
+    def __str__(self):
+        parameters = ', '.join(str(param) for param in self.parameters)
+        return f'{self.name}({parameters}) -> {self.return_type}'
 
 
 def load_source_content(location: Location, before=2, after=2):
@@ -771,7 +1052,8 @@ def show_source_lines(location: Location, before=2, after=2, columns=None):
 def build(filenames: Sequence[str]):
     context = SemanticContext()
     for filename in filenames:
-        context.open(filename)
+        model = context.open(filename)
+        print()
 
 
 def process_pdb(parser: argparse.ArgumentParser, action):
@@ -809,34 +1091,29 @@ def process_errors(action):
 
 def initialize_logging():
     """ Prepare rules for loggers """
-    # Prepare console logger
+    if sys.stderr.isatty():
+        formatter = ColoredFormatter(
+            '%(reset)s%(message_log_color)s%(message)s',
+            datefmt=None,
+            reset=True,
+            log_colors={
+                'DEBUG': 'cyan',
+                'INFO': 'green',
+                'WARNING': 'yellow',
+                'ERROR': 'red',
+                'CRITICAL': 'red',
+            },
+            secondary_log_colors={
+                'message': {
+                    'ERROR': 'red',
+                    'CRITICAL': 'red'
+                }
+            }
+        )
+    else:
+        formatter = logging.Formatter('%(message)s')
     console = logging.StreamHandler()
-
-    # # Prepare console formatter
-    # if sys.stderr.isatty():
-    #     formatter = ColoredFormatter(
-    #         '%(reset)s%(message_log_color)s%(message)s',
-    #         datefmt=None,
-    #         reset=True,
-    #         log_colors={
-    #             'DEBUG': 'cyan',
-    #             'INFO': 'green',
-    #             'WARNING': 'yellow',
-    #             'ERROR': 'red',
-    #             'CRITICAL': 'red',
-    #         },
-    #         secondary_log_colors={
-    #             'message': {
-    #                 'ERROR': 'red',
-    #                 'CRITICAL': 'red'
-    #             }
-    #         }
-    #     )
-    # else:
-    formatter = logging.Formatter('%(message)s')
     console.setFormatter(formatter)
-
-    # Setup logging in console
     logger.addHandler(console)
 
 

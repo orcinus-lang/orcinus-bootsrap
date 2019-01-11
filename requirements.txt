@@ -1,0 +1,3 @@
+llvmlite==0.25.0
+multimethod==1.0
+colorlog==4.0.2

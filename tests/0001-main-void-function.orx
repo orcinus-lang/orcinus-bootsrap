@@ -1,0 +1,3 @@
+# WARNING: replace `return` with `pass`
+def main() -> void:
+    return

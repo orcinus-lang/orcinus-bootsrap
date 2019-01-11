@@ -17,7 +17,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass
-from typing import Sequence, Iterator, Optional, cast
+from typing import Sequence, Iterator, Optional, cast, Mapping
 
 from colorlog import ColoredFormatter
 from llvmlite import binding
@@ -71,6 +71,7 @@ class TokenID(enum.IntEnum):
     Pass = enum.auto()
     Import = enum.auto()
     From = enum.auto()
+    Return = enum.auto()
     As = enum.auto()
     Then = enum.auto()
     Ellipsis = enum.auto()
@@ -256,7 +257,8 @@ class Scanner:
         'pass': TokenID.Pass,
         'import': TokenID.Import,
         'from': TokenID.From,
-        'as': TokenID.As
+        'as': TokenID.As,
+        'return': TokenID.Return
     }
 
     # Final tuple contains all patterns
@@ -338,9 +340,10 @@ class Scanner:
                     yield Token(TokenID.Undent, '', location)
                     indentions.pop()
 
-            is_new = False
-            is_empty = False
-            if token not in self.TRIVIA_TOKENS:
+            if token.id not in self.TRIVIA_TOKENS:
+                is_new = False
+                is_empty = False
+
                 yield token
 
             if token.id in self.OPEN_BRACKETS:
@@ -387,6 +390,9 @@ class Scanner:
 
 
 class Parser:
+    EXPRESSION_STARTS = (TokenID.Number,)
+    STATEMENT_STARTS = (TokenID.Pass, TokenID.Return) + EXPRESSION_STARTS
+
     def __init__(self, filename, stream):
         self.tokens = list(Scanner(filename, stream))
         self.index = 0
@@ -555,7 +561,7 @@ class Parser:
         """
         self.consume(TokenID.Indent)
         statements = [self.parse_statement()]
-        while self.match(TokenID.Pass):
+        while self.match(*self.STATEMENT_STARTS):
             statements.append(self.parse_statement())
         self.consume(TokenID.Undent)
         location = statements[0].location + statements[-1].location
@@ -566,13 +572,58 @@ class Parser:
     def parse_statement(self) -> StatementAST:
         """
         statement:
-            'pass'
+            pass_statement
+            return_statement
+            expression_statement
         """
+        if self.match(TokenID.Pass):
+            return self.parse_pass_statement()
+        elif self.match(TokenID.Return):
+            return self.parse_return_statement()
+        elif self.match(*self.EXPRESSION_STARTS):
+            return self.parse_expression_statement()
+
+        self.consume(*self.STATEMENT_STARTS)
+
+    def parse_pass_statement(self):
+        """ pass_statement: pass """
         tok_pass = self.consume(TokenID.Pass)
         self.consume(TokenID.NewLine)
 
         # noinspection PyArgumentList
         return PassStatementAST(location=tok_pass.location)
+
+    def parse_return_statement(self):
+        """
+        return_statement
+            'return' [ expression ]
+        """
+        tok_return = self.consume(TokenID.Return)
+        value = self.parse_expression() if self.match(*self.EXPRESSION_STARTS) else None
+        self.consume(TokenID.NewLine)
+
+        # noinspection PyArgumentList
+        return ReturnStatementAST(value=value, location=tok_return.location)
+
+    def parse_expression_statement(self):
+        raise NotImplementedError
+
+    def parse_expression(self):
+        """
+        expression:
+            number
+        """
+        if self.match(TokenID.Number):
+            return self.parse_number_expression()
+        self.consume(*self.EXPRESSION_STARTS)
+
+    def parse_number_expression(self):
+        """
+        number:
+            Number
+        """
+        tok_number = self.consume(TokenID.Number)
+        return IntegerExpressionAST(value=int(tok_number.value), location=tok_number.location)
 
 
 @dataclass(unsafe_hash=True, frozen=True)
@@ -627,6 +678,21 @@ class BlockStatementAST(StatementAST):
 @dataclass(unsafe_hash=True, frozen=True)
 class PassStatementAST(StatementAST):
     pass
+
+
+@dataclass(unsafe_hash=True, frozen=True)
+class ReturnStatementAST(StatementAST):
+    value: Optional[ExpressionAST] = None
+
+
+@dataclass(unsafe_hash=True, frozen=True)
+class ExpressionAST(NodeAST):
+    pass
+
+
+@dataclass(unsafe_hash=True, frozen=True)
+class IntegerExpressionAST(NodeAST):
+    value: int
 
 
 class SemanticContext:
@@ -714,6 +780,7 @@ class SemanticModel:
 
     def analyze(self):
         self.declare_symbol(self.tree)
+        self.emit_functions(self.tree)
 
     def declare_symbol(self, node: NodeAST, parent: ContainerSymbol = None):
         symbol = self.annotate_symbol(node, parent)
@@ -768,6 +835,46 @@ class SemanticModel:
             self.symbols[node_param] = func_param
 
         return func
+
+    def emit_functions(self, module: ModuleAST):
+        for member in module.members:
+            if isinstance(member, FunctionAST):
+                self.emit_function(member)
+
+    def emit_function(self, node: FunctionAST):
+        func = self.symbols[node]
+        if node.statement:
+            func.statement = self.emit_statement(node.statement)
+
+    @multimethod
+    def emit_statement(self, node: StatementAST) -> Statement:
+        raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented statement emitting")
+
+    @multimethod
+    def emit_statement(self, node: BlockStatementAST) -> Statement:
+        statements = [self.emit_statement(statement) for statement in node.statements]
+        return BlockStatement(statements, node.location)
+
+    @multimethod
+    def emit_statement(self, node: PassStatementAST) -> Statement:
+        return PassStatement(node.location)
+
+    @multimethod
+    def emit_statement(self, node: ReturnStatementAST) -> Statement:
+        value = self.emit_value(node.value) if node.value else None
+        return ReturnStatement(value, node.location)
+
+    @multimethod
+    def emit_statement(self, node: ExpressionAST) -> Statement:
+        raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented value emitting")
+
+    @multimethod
+    def emit_value(self, node: ExpressionAST) -> Value:
+        raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented statement emitting")
+
+    @multimethod
+    def emit_value(self, node: IntegerExpressionAST) -> IntegerConstant:
+        return IntegerConstant(IntegerType(self.module, node.location), node.value, node.location)
 
 
 class Symbol(abc.ABC):
@@ -953,6 +1060,7 @@ class Function(Value, OwnedSymbol):
         self.__parameters = [
             Parameter(self, f'arg{idx}', param_type) for idx, param_type in enumerate(func_type.parameters)
         ]
+        self.__statement = None
 
     @property
     def owner(self) -> ContainerSymbol:
@@ -974,9 +1082,50 @@ class Function(Value, OwnedSymbol):
     def return_type(self) -> Type:
         return self.function_type.return_type
 
+    @property
+    def statement(self) -> Optional[Statement]:
+        return self.__statement
+
+    @statement.setter
+    def statement(self, statement: Optional[Statement]):
+        self.__statement = statement
+
     def __str__(self):
         parameters = ', '.join(str(param) for param in self.parameters)
         return f'{self.name}({parameters}) -> {self.return_type}'
+
+
+class IntegerConstant(Value):
+    def __init__(self, type: IntegerType, value: int, location: Location):
+        super(IntegerConstant, self).__init__(type, location)
+
+        self.value = value
+
+    def __str__(self):
+        return str(self.value)
+
+
+class Statement:
+    def __init__(self, location: Location):
+        self.location = location
+
+
+class BlockStatement(Statement):
+    def __init__(self, statements: Sequence[Statement], location: Location):
+        super(BlockStatement, self).__init__(location)
+
+        self.statements = statements
+
+
+class PassStatement(Statement):
+    pass
+
+
+class ReturnStatement(Statement):
+    def __init__(self, value: Optional[Value], location=None):
+        super(ReturnStatement, self).__init__(location)
+
+        self.value = value
 
 
 class LazyDict(dict):
@@ -1053,6 +1202,9 @@ class ModuleCodegen:
 
     def emit_function(self, func: Function):
         llvm_func = self.llvm_functions[func]
+        if func.statement:
+            builder = FunctionCodegen(self, func, llvm_func)
+            builder.emit_statement(func.statement)
         if func.name == 'main':
             self.emit_main(func)
         return llvm_func
@@ -1088,6 +1240,58 @@ class ModuleCodegen:
         elif llvm_result.type.width < 32:
             llvm_result = llvm_builder.sext(llvm_result, ir.IntType(32))
         llvm_builder.ret(llvm_result)
+
+
+class FunctionCodegen:
+    def __init__(self, parent: ModuleCodegen, func: Function, llvm_func: ir.Function):
+        self.parent = parent
+        self.function = func
+        self.llvm_function = llvm_func
+
+        llvm_entry = llvm_func.append_basic_block('entry')
+        self.llvm_builder = ir.IRBuilder(llvm_entry)
+
+    @property
+    def llvm_module(self) -> ir.Module:
+        return self.parent.llvm_module
+
+    @property
+    def llvm_types(self) -> Mapping[Type, ir.Type]:
+        return self.parent.llvm_types
+
+    @property
+    def llvm_functions(self) -> Mapping[Function, ir.Function]:
+        return self.parent.llvm_functions
+
+    @multimethod
+    def emit_statement(self, statement: Statement):
+        raise Diagnostic(statement.location, DiagnosticSeverity.Error, "Not implemented statement conversion to LLVM")
+
+    @multimethod
+    def emit_statement(self, statement: BlockStatement):
+        for child in statement.statements:
+            self.emit_statement(child)
+
+    @multimethod
+    def emit_statement(self, statement: PassStatement):
+        pass  # :D
+
+    @multimethod
+    def emit_statement(self, statement: ReturnStatement):
+        if statement.value:
+            llvm_value = self.emit_value(statement.value)
+            self.llvm_builder.ret(llvm_value)
+        else:
+            self.llvm_builder.ret_void()
+
+    @multimethod
+    def emit_value(self, value: Value):
+        raise Diagnostic(value.location, DiagnosticSeverity.Error, "Not implemented value conversion to LLVM")
+
+    @multimethod
+    def emit_value(self, value: IntegerConstant):
+        llvm_type = self.llvm_types[value.type]
+        return ir.Constant(llvm_type, value.value)
 
 
 def load_source_content(location: Location, before=2, after=2):

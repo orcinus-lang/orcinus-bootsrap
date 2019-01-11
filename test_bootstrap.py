@@ -6,6 +6,7 @@
 import os
 import subprocess
 import sys
+import warnings as pywarnings
 
 import pytest
 
@@ -80,26 +81,10 @@ def compile_and_execute(filename, *, name, opt_level, arguments, input=None):
     return (True,) + execute([LLI_EXECUTABLE, f'-O{opt_level}'] + flags, input=assembly)
 
 
-def read_or_none(filename, *, default=None, type=None):
-    if not filename:
-        return default
-
-    try:
-        with open(filename, 'r+', encoding='utf-8') as stream:
-            content = stream.read()
-            content = content.rstrip()
-            if type:
-                content = type(content)
-            return content
-    except IOError:
-        return default
-
-
-def read_or_list(filename, *, type=None):
-    value = read_or_none(filename, default='')
-    if type:
-        return [type(arg.strip()) for arg in value.split('\n')] if value else []
-    return [arg.strip() for arg in value.split(' ')] if value else []
+def remove_startswith_and_strip(haystack: str, needle: str) -> str:
+    if haystack.startswith(needle):
+        return haystack[len(needle) + 1:].strip()
+    return ""
 
 
 def source_name(fixture_value):
@@ -114,19 +99,64 @@ def source_cases(request):
     fixture, _ = os.path.splitext(request.param)
     root_path = os.path.dirname(__file__)
 
-    return (
-        fixture,
-        os.path.abspath(os.path.join(root_path, "{}.orx".format(fixture))),
-        read_or_list(os.path.join(root_path, "{}.args".format(fixture)), type=str),
-        read_or_none(os.path.join(root_path, "{}.in".format(fixture)), type=str),
-        read_or_none(os.path.join(root_path, "{}.out".format(fixture)), type=str),
-        read_or_none(os.path.join(root_path, "{}.err".format(fixture)), type=str),
-        read_or_none(os.path.join(root_path, "{}.code".format(fixture)), default=0, type=int),
-    )
+    fullname = os.path.abspath(os.path.join(root_path, "{}.orx".format(fixture)))
+
+    warnings_list = []
+    arguments = []
+    result_code = 0
+    inputs = []
+    outputs = []
+    errors = []
+
+    with open(fullname, 'r', encoding='utf-8') as stream:
+        for line in stream:
+            line = remove_startswith_and_strip(line, '#')
+            if not line:
+                continue
+
+            # warning
+            test_msg = remove_startswith_and_strip(line, "WARNING:")
+            if test_msg:
+                warnings_list.append(test_msg)
+
+            # exit code
+            test_msg = remove_startswith_and_strip(line, "EXIT:")
+            if test_msg:
+                result_code = int(test_msg)
+
+            # argument
+            test_msg = remove_startswith_and_strip(line, "ARG:")
+            if test_msg:
+                arguments.append(test_msg)
+
+            # input
+            test_msg = remove_startswith_and_strip(line, "INPUT:")
+            if test_msg:
+                inputs.append(test_msg)
+
+            # output
+            test_msg = remove_startswith_and_strip(line, "OUTPUT:")
+            if test_msg:
+                outputs.append(test_msg)
+
+            # error
+            test_msg = remove_startswith_and_strip(line, "ERROR:")
+            if test_msg:
+                errors.append(test_msg)
+
+    # Defaults
+    input_string = "\n".join(inputs)
+    output_string = "\n".join(outputs)
+    error_string = "\n".join(errors)
+
+    return fixture, fullname, warnings_list, arguments, input_string, output_string, error_string, result_code
 
 
 def test_compile_and_execution(source_cases):
-    name, filename, arguments, input, expected_output, expected_error, expected_code = source_cases
+    name, filename, warnings, arguments, input, expected_output, expected_error, expected_code = source_cases
+
+    for warning in warnings:
+        pywarnings.warn(UserWarning(warning))
 
     # for opt_level in [0, 1, 2, 3]:  # Test on all optimization levels
     for opt_level in (0,):

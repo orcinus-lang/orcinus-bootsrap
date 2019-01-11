@@ -8,6 +8,7 @@ from __future__ import annotations
 import abc
 import argparse
 import collections
+import dataclasses
 import enum
 import functools
 import io
@@ -703,6 +704,20 @@ class Parser:
 class NodeAST:
     location: Location
 
+    def __make_iter(self):
+        for field in dataclasses.fields(self):
+            value = getattr(self, field.name)
+            if isinstance(value, list):
+                class_name = type(self).__class__
+                raise RuntimeError(f"Found not hashable field `{class_name}`.`{field.name}`")
+            elif isinstance(value, tuple):
+                yield from (child for child in value if isinstance(child, NodeAST))
+            elif isinstance(value, NodeAST):
+                yield value
+
+    def __iter__(self):
+        return self.__make_iter()
+
 
 @dataclass(unsafe_hash=True, frozen=True)
 class ModuleAST(NodeAST):
@@ -777,6 +792,79 @@ class NamedExpressionAST(ExpressionAST):
 class CallExpressionAST(ExpressionAST):
     value: ExpressionAST
     arguments: Sequence[ExpressionAST]
+
+
+class LexicalScope(collections.abc.MutableMapping):
+    def __init__(self, parent: LexicalScope = None):
+        self.__parent = parent
+        self.__defined = dict()  # Defined symbols
+        self.__resolved = dict()  # Resolved symbols
+
+    @property
+    def parent(self) -> LexicalScope:
+        return self.__parent
+
+    def __getitem__(self, name: str) -> NamedSymbol:
+        """
+        Resolve symbol by name in current scope.
+
+        If symbol is defined in current scope and:
+
+            - has type `Overload` it must extended with functions from parent scope
+
+        If symbol is not defined in current scope, check if it can be resolved in parent scope.
+        """
+
+        # If symbol already resolved then returns it.
+        if name in self.__resolved:
+            return self.__resolved[name]
+
+        # Resolve symbol in current scope
+        symbol = self.__defined.get(name)
+        if symbol:
+            if self.parent and isinstance(symbol, Overload):
+                parent_symbol = self.parent.get(name)
+                if isinstance(parent_symbol, Overload):
+                    symbol.extend(parent_symbol)
+
+        # Resolve symbol in parent scope
+        elif self.parent:
+            symbol = self.parent[name]
+
+        if not symbol:
+            raise KeyError(name)
+
+        # Clone overload
+        if isinstance(symbol, Overload):
+            overload = Overload(name, symbol.functions[0])
+            overload.extend(overload)
+            symbol = overload
+
+        # Save resolved symbol
+        self.__resolved[name] = symbol
+        return symbol
+
+    def __setitem__(self, name: str, symbol: NamedSymbol) -> None:
+        existed_symbol = self.get(name)
+        if not existed_symbol:
+            self.__defined[name] = symbol = Overload(name, symbol) if isinstance(symbol, Function) else symbol
+            return
+
+        elif isinstance(existed_symbol, Overload):
+            if isinstance(symbol, Function):
+                existed_symbol.append(symbol)
+                return
+
+        raise Diagnostic(symbol.location, DiagnosticSeverity.Error, f"Already defined symbol with name {name}")
+
+    def __delitem__(self, name: str):
+        del self.__resolved[name]
+
+    def __len__(self) -> int:
+        return len(self.__resolved)
+
+    def __iter__(self) -> Iterator[NamedSymbol]:
+        return iter(self.__resolved)
 
 
 class SemanticContext:
@@ -855,6 +943,7 @@ class SemanticModel:
         self.module_name = module_name
         self.tree = tree
         self.symbols = {}
+        self.scopes = {}
         self.types = []
         self.functions = []
 
@@ -863,18 +952,40 @@ class SemanticModel:
         return self.symbols[self.tree]
 
     def analyze(self):
+        self.annotate_recursive_scope(self.tree)
         self.declare_symbol(self.tree)
         self.emit_functions(self.tree)
+
+    def annotate_recursive_scope(self, node: NodeAST, parent=None):
+        scope = self.scopes.get(node) or self.annotate_scope(node, parent)
+        self.scopes[node] = scope
+        for child in node:
+            self.annotate_recursive_scope(child, scope)
+
+    @multimethod
+    def annotate_scope(self, node: NodeAST, parent: LexicalScope) -> LexicalScope:
+        return parent
+
+    @multimethod
+    def annotate_scope(self, node: ModuleAST, parent=None) -> LexicalScope:
+        return LexicalScope()
 
     def declare_symbol(self, node: NodeAST, parent: ContainerSymbol = None):
         symbol = self.annotate_symbol(node, parent)
         self.symbols[node] = symbol
 
+        # Collect types and functions from model
         if isinstance(symbol, Type):
             self.types.append(symbol)
         elif isinstance(symbol, Function):
             self.functions.append(symbol)
 
+        # Declare symbol in current scope
+        if isinstance(symbol, NamedSymbol):
+            scope = self.scopes[node]
+            scope[symbol.name] = symbol
+
+        # Add members
         if hasattr(node, 'members'):
             for child in node.members:
                 child_symbol = self.declare_symbol(child, symbol)
@@ -963,7 +1074,29 @@ class SemanticModel:
 
     @multimethod
     def emit_value(self, node: CallExpressionAST) -> Value:
-        # value = self.emit_value(node.value)
+        arguments = [self.emit_value(arg) for arg in node.arguments]
+        if not isinstance(node.value, NamedExpressionAST):
+            raise Diagnostic(
+                node.location, DiagnosticSeverity.Error, 'Not implemented object call')
+
+        name = node.value.name
+        scope = self.scopes[node]
+        symbol = scope.get(name)
+        if not symbol:
+            raise Diagnostic(
+                node.location, DiagnosticSeverity.Error, f'Not found function `{name}` in current scope')
+
+        if not isinstance(symbol, Overload):
+            raise Diagnostic(
+                node.location, DiagnosticSeverity.Error, 'Not implemented object call')
+
+        if len(symbol.functions) != 1:
+            raise Diagnostic(
+                node.location, DiagnosticSeverity.Error, 'Not implemented function overloading')
+
+        func = symbol.functions[0]
+        return Call(func, arguments, node.location)
+
 
 class Symbol(abc.ABC):
     """ Abstract base for all symbols """
@@ -1183,6 +1316,32 @@ class Function(Value, OwnedSymbol):
         return f'{self.name}({parameters}) -> {self.return_type}'
 
 
+class Overload(NamedSymbol):
+    def __init__(self, name: str, function: Function):
+        self.__name = name
+        self.__functions = [function]
+
+    @property
+    def functions(self) -> Sequence[Function]:
+        return self.__functions
+
+    @property
+    def name(self) -> str:
+        return self.__name
+
+    @property
+    def location(self) -> Location:
+        return self.functions[0].location
+
+    def append(self, func: Function):
+        if func not in self.__functions:
+            self.__functions.append(func)
+
+    def extend(self, overload: Overload):
+        for function in overload.functions:
+            self.append(function)
+
+
 class IntegerConstant(Value):
     def __init__(self, value_type: IntegerType, value: int, location: Location):
         super(IntegerConstant, self).__init__(value_type, location)
@@ -1191,6 +1350,18 @@ class IntegerConstant(Value):
 
     def __str__(self):
         return str(self.value)
+
+
+class Call(Value):
+    def __init__(self, func: Function, arguments: Sequence[Value], location: Location):
+        super(Call, self).__init__(func.return_type, location)
+
+        self.function = func
+        self.arguments = arguments
+
+    def __str__(self):
+        arguments = ', '.join(str(arg) for arg in self.arguments)
+        return f'{self.function.name}({arguments})'
 
 
 class Statement:
@@ -1380,6 +1551,12 @@ class FunctionCodegen:
     def emit_value(self, value: IntegerConstant):
         llvm_type = self.llvm_types[value.type]
         return ir.Constant(llvm_type, value.value)
+
+    @multimethod
+    def emit_value(self, value: Call):
+        llvm_args = [self.emit_value(arg) for arg in value.arguments]
+        llvm_func = self.llvm_functions[value.function]
+        return self.llvm_builder.call(llvm_func, llvm_args)
 
 
 def load_source_content(location: Location, before=2, after=2):

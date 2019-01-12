@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Sequence, Iterator, Optional, cast, Mapping, Tuple
 
@@ -89,6 +90,7 @@ class TokenID(enum.IntEnum):
     While = enum.auto()
     Struct = enum.auto()
     Class = enum.auto()
+    Equals = enum.auto()
 
 
 @dataclass
@@ -261,6 +263,7 @@ class Scanner:
         (r',', TokenID.Comma),
         (r':', TokenID.Colon),
         (r';', TokenID.Semicolon),
+        (r'=', TokenID.Equals),
         (r'\-\>', TokenID.Then),
 
         (r'\n', TokenID.NewLine),
@@ -822,11 +825,38 @@ class Parser:
         )
 
     def parse_expression_statement(self) -> StatementAST:
-        value = self.parse_expression()
-        self.consume(TokenID.NewLine)
+        """
+        expression_statement
+            expression
+            assign_expression
+        """
+        expression = self.parse_expression()
+        statement = None
 
         # noinspection PyArgumentList
-        return ExpressionStatementAST(value=value, location=value.location)
+        if self.match(TokenID.Equals):
+            statement = self.parse_assign_statement(expression)
+
+        self.consume(TokenID.NewLine)
+        if not statement:
+            statement = ExpressionStatementAST(value=value, location=value.location)
+        return statement
+
+    def parse_assign_statement(self, target: ExpressionAST):
+        """
+        assign_expression
+            target '=' expression
+        """
+        self.consume(TokenID.Equals)
+        source = self.parse_expression()
+        location = target.location + source.location
+
+        # noinspection PyArgumentList
+        return AssignStatementAST(
+            target=target,
+            source=source,
+            location=location
+        )
 
     def parse_arguments(self) -> Sequence[ExpressionAST]:
         """
@@ -1060,6 +1090,12 @@ class ExpressionStatementAST(StatementAST):
 
 
 @dataclass(unsafe_hash=True, frozen=True)
+class AssignStatementAST(StatementAST):
+    target: ExpressionAST
+    source: ExpressionAST
+
+
+@dataclass(unsafe_hash=True, frozen=True)
 class ExpressionAST(NodeAST):
     pass
 
@@ -1242,9 +1278,21 @@ class SemanticModel:
         self.symbols = {}
         self.scopes = {}
 
+        self.__functions = collections.deque()
+
     @property
     def module(self) -> Module:
         return self.symbols[self.tree]
+
+    @contextmanager
+    def with_function(self, func: Function):
+        self.__functions.append(func)
+        yield func
+        self.__functions.pop()
+
+    @property
+    def current_function(self) -> Function:
+        return self.__functions[0]
 
     def analyze(self):
         self.annotate_recursive_scope(self.tree)
@@ -1383,7 +1431,8 @@ class SemanticModel:
     def emit_function(self, node: FunctionAST):
         func = self.symbols[node]
         if node.statement:
-            func.statement = self.emit_statement(node.statement)
+            with self.with_function(func):
+                func.statement = self.emit_statement(node.statement)
 
     def get_functions(self, scope: LexicalScope, name: str, self_type: Type = None) -> Sequence[Function]:
         functions = []
@@ -1488,6 +1537,15 @@ class SemanticModel:
     @multimethod
     def emit_statement(self, node: ReturnStatementAST) -> Statement:
         value = self.emit_value(node.value) if node.value else None
+        return_type = self.current_function.return_type
+        void_type = self.context.void_type
+
+        if value and value.type != return_type:
+            message = f"Return statement value must have ‘{return_type}’ type, got ‘{value.type}’"
+            raise Diagnostic(node.location, DiagnosticSeverity.Error, message)
+        elif not value and void_type != return_type:
+            message = f"Return statement value must have ‘{return_type}’ type, got ‘{void_type}’"
+            raise Diagnostic(node.location, DiagnosticSeverity.Error, message)
         return ReturnStatement(value, node.location)
 
     @multimethod
@@ -1522,16 +1580,36 @@ class SemanticModel:
         return WhileStatement(condition, then_statement, else_statement, node.location)
 
     @multimethod
+    def emit_statement(self, node: AssignStatementAST) -> Statement:
+        value = self.emit_value(node.source)
+        return self.emit_assignment(node.target, value, node.location)
+
+    @multimethod
+    def emit_assignment(self, node: ExpressionAST, value: Value, location: Location) -> Statement:
+        raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented target assignement emitting")
+
+    @multimethod
+    def emit_assignment(self, node: NamedExpressionAST, value: Value, location: Location) -> Statement:
+        symbol = self.emit_symbol(node, False)
+        if not isinstance(symbol, TargetValue):
+            symbol = self.current_function.add_variables(node.name, value.type, location)
+
+            scope: LexicalScope = self.scopes[node]
+            scope.append(symbol)
+
+        return AssignStatement(symbol, value, node.location)
+
+    @multimethod
     def emit_value(self, node: ExpressionAST) -> Value:
         raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented value emitting")
 
     @multimethod
     def emit_value(self, node: IntegerExpressionAST) -> Value:
-        return IntegerConstant(self.context.integer_type, node.value, node.location)
+        return self.emit_symbol(node, True)
 
     @multimethod
     def emit_value(self, node: NamedExpressionAST) -> Value:
-        value = self.emit_symbol(node)
+        value = self.emit_symbol(node, True)
         if isinstance(value, Value):
             return value
 
@@ -1541,7 +1619,7 @@ class SemanticModel:
     def emit_value(self, node: CallExpressionAST) -> Value:
         arguments = [self.emit_value(arg) for arg in node.arguments]
 
-        symbol = self.emit_symbol(node.value)
+        symbol = self.emit_symbol(node.value, True)
 
         # function call
         if isinstance(symbol, Overload):
@@ -1555,11 +1633,15 @@ class SemanticModel:
         raise Diagnostic(node.location, DiagnosticSeverity.Error, f'Not found function for call')
 
     @multimethod
-    def emit_symbol(self, node: ExpressionAST) -> Symbol:
+    def emit_symbol(self, node: ExpressionAST, is_exists: bool) -> Symbol:
         raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented symbol emitting")
 
     @multimethod
-    def emit_symbol(self, node: NamedExpressionAST) -> Symbol:
+    def emit_symbol(self, node: IntegerExpressionAST, is_exists: bool) -> Symbol:
+        return IntegerConstant(self.context.integer_type, node.value, node.location)
+
+    @multimethod
+    def emit_symbol(self, node: NamedExpressionAST, is_exists: bool) -> Symbol:
         if node.name in ['True', 'False']:
             return BooleanConstant(self.context.boolean_type, node.name == 'True', node.location)
         elif node.name == 'void':
@@ -1571,18 +1653,19 @@ class SemanticModel:
 
         scope = self.scopes[node]
         symbol = scope.resolve(node.name)
-        if not symbol:
+        if is_exists and not symbol:
             raise Diagnostic(
                 node.location, DiagnosticSeverity.Error, f"Not found symbol `{node.name} in current scope`")
         return symbol
 
     @multimethod
-    def emit_symbol(self, node: SubscribeExpressionAST) -> Symbol:
-        symbol = self.emit_symbol(node.value)
+    def emit_symbol(self, node: SubscribeExpressionAST, is_exists: bool) -> Symbol:
+        symbol = self.emit_symbol(node.value, True)
         arguments = [self.emit_symbol(arg) for arg in node.arguments]
 
         if isinstance(symbol, Type):
             return symbol.instantiate(self.module, arguments, node.location)
+
         raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented symbol emitting")
 
 
@@ -2222,11 +2305,15 @@ class FunctionType(Type):
         return f"({parameters}) -> {self.return_type}"
 
 
-class GenericType(Type, GenericParameter):
+class GenericType(GenericParameter, Type):
     pass
 
 
-class Parameter(OwnedSymbol, Value):
+class TargetValue(Value, abc.ABC):
+    pass
+
+
+class Parameter(OwnedSymbol, TargetValue):
     def __init__(self, owner: Function, name: str, param_type: Type):
         super(Parameter, self).__init__(param_type, owner.location)
 
@@ -2249,6 +2336,20 @@ class Parameter(OwnedSymbol, Value):
         return f'{self.name}: {self.type}'
 
 
+class Variable(NamedSymbol, TargetValue):
+    def __init__(self, name: str, type: Type, location: Location):
+        super(Variable, self).__init__(type, location)
+
+        self.__name = name
+
+    @property
+    def name(self) -> str:
+        return self.__name
+
+    def __str__(self):
+        return self.name
+
+
 class Function(MangledSymbol, GenericSymbol, OwnedSymbol, Value):
     def __init__(self, owner: ContainerSymbol, name: str, func_type: FunctionType, location: Location, *,
                  generic_parameters=None, generic_arguments=None, definition=None):
@@ -2262,6 +2363,7 @@ class Function(MangledSymbol, GenericSymbol, OwnedSymbol, Value):
         self.__generic_parameters = tuple(generic_parameters or [])
         self.__generic_arguments = tuple(generic_arguments or [])
         self.__definition = definition
+        self.__variables = []
 
         self.module.add_function(self)
 
@@ -2303,6 +2405,10 @@ class Function(MangledSymbol, GenericSymbol, OwnedSymbol, Value):
         return self.function_type.return_type
 
     @property
+    def variables(self) -> Sequence[Variable]:
+        return self.__variables
+
+    @property
     def statement(self) -> Optional[Statement]:
         return self.__statement
 
@@ -2323,12 +2429,24 @@ class Function(MangledSymbol, GenericSymbol, OwnedSymbol, Value):
             instance = Function(
                 module, self.name, function_type, self.location, generic_arguments=generic_arguments, definition=self)
             context.register(self, instance)
+
             for original_param, instance_param in zip(self.parameters, instance.parameters):
                 context.register(original_param, instance_param)
+
+            for original_var in self.variables:
+                new_type = context.instantiate(original_var.type, location)
+                new_var = instance.add_variables(original_var.name, new_type, original_var.location)
+                context.register(original_var, new_var)
+
             instance.statement = context.instantiate(self.statement, location)
 
         module.register_instance(self.definition or self, generic_arguments, instance)
         return instance
+
+    def add_variables(self, name: str, type: Type, location: Location):
+        var = Variable(name, type, location)
+        self.__variables.append(var)
+        return var
 
 
 class Overload(NamedSymbol):
@@ -2446,6 +2564,14 @@ class WhileStatement(Statement):
         self.condition = condition
         self.then_statement = then_statement
         self.else_statement = else_statement
+
+
+class AssignStatement(Statement):
+    def __init__(self, target: TargetValue, source: Value, location: Location):
+        super(AssignStatement, self).__init__(location)
+
+        self.target = target
+        self.source = source
 
 
 class LazyDict(dict):
@@ -2591,10 +2717,19 @@ class FunctionCodegen:
         self.parent = parent
         self.function = func
         self.llvm_function = llvm_func
-        self.llvm_parameters = {param: llvm_arg for param, llvm_arg in zip(func.parameters, llvm_func.args)}
+        self.llvm_variables = {}
 
         llvm_entry = llvm_func.append_basic_block('entry')
         self.llvm_builder = ir.IRBuilder(llvm_entry)
+
+        for param, llvm_arg in zip(func.parameters, llvm_func.args):
+            llvm_alloca = self.llvm_builder.alloca(llvm_arg.type)
+            self.llvm_variables[param] = llvm_alloca
+            self.llvm_builder.store(llvm_arg, llvm_alloca)
+
+        for var in func.variables:
+            llvm_alloca = self.llvm_builder.alloca(self.llvm_types[var.type])
+            self.llvm_variables[var] = llvm_alloca
 
     @property
     def llvm_module(self) -> ir.Module:
@@ -2709,13 +2844,28 @@ class FunctionCodegen:
         else:
             self.llvm_builder.position_at_end(llvm_continue_block)
 
+        return False
+
+    @multimethod
+    def emit_statement(self, statement: AssignStatement) -> bool:
+        llvm_source = self.emit_value(statement.source)
+        llvm_target = self.emit_target(statement.target)
+        self.llvm_builder.store(llvm_source, llvm_target)
+        return False
+
     @multimethod
     def emit_value(self, value: Value):
         raise Diagnostic(value.location, DiagnosticSeverity.Error, "Not implemented value conversion to LLVM")
 
     @multimethod
     def emit_value(self, value: Parameter):
-        return self.llvm_parameters[value]
+        llvm_alloca = self.llvm_variables[value]
+        return self.llvm_builder.load(llvm_alloca)
+
+    @multimethod
+    def emit_value(self, value: Variable):
+        llvm_alloca = self.llvm_variables[value]
+        return self.llvm_builder.load(llvm_alloca)
 
     @multimethod
     def emit_value(self, value: IntegerConstant):
@@ -2738,6 +2888,18 @@ class FunctionCodegen:
         llvm_type = self.llvm_types[value.type]
         llvm_alloca = self.llvm_builder.alloca(llvm_type)
         return self.llvm_builder.load(llvm_alloca)
+
+    @multimethod
+    def emit_target(self, value: TargetValue):
+        raise Diagnostic(value.location, DiagnosticSeverity.Error, "Not implemented target conversion to LLVM")
+
+    @multimethod
+    def emit_target(self, value: Parameter):
+        return self.llvm_variables[value]
+
+    @multimethod
+    def emit_target(self, value: Variable):
+        return self.llvm_variables[value]
 
 
 def load_source_content(location: Location, before=2, after=2):

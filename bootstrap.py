@@ -11,6 +11,7 @@ import collections
 import dataclasses
 import enum
 import functools
+import heapq
 import io
 import itertools
 import logging
@@ -1260,6 +1261,70 @@ class SemanticModel:
         if node.statement:
             func.statement = self.emit_statement(node.statement)
 
+    def get_functions(self, scope: LexicalScope, name: str, self_type: Type = None) -> Sequence[Function]:
+        functions = []
+
+        # scope function
+        symbol = scope.resolve(name)
+        if isinstance(symbol, Overload):
+            functions.extend(symbol.functions)
+
+        # type function
+        symbol = self_type.scope.resolve(name) if self_type else None
+        if isinstance(symbol, Overload):
+            functions.extend(symbol.functions)
+
+        return functions
+
+    @staticmethod
+    def check_function(func: Function, arguments: Sequence[Value]) -> Optional[int]:
+        """
+        Returns:
+
+            - None              - if function can not be called with arguments
+            - Sequence[int]     - if function can be called with arguments. Returns priority
+
+        :param func:
+        :param arguments:
+        :return:
+        """
+        if len(func.parameters) != len(arguments):
+            return None
+
+        priority = 0
+        for param, arg in zip(func.parameters, arguments):
+            if arg.type != param.type:
+                return None
+            priority += 2
+        return priority
+
+    def find_function(self, scope: LexicalScope, name: str, arguments: Sequence[Value]) -> Optional[Function]:
+        # find candidates
+        functions = self.get_functions(scope, name, arguments[0] if arguments else None)
+
+        # check candidates
+        counter = itertools.count()
+        candidates = []
+        for func in functions:
+            priority = self.check_function(func, arguments)
+            if priority is not None:
+                heapq.heappush(candidates, (priority, next(counter), func))
+
+        # pop all function with minimal priority
+        functions = []
+        current_priority = None
+        while candidates:
+            priority, _, func = heapq.heappop(candidates)
+            if current_priority is not None and current_priority != priority:
+                break
+
+            current_priority = priority
+            functions.append(func)
+
+        if functions:
+            return functions[0]
+        return None
+
     @multimethod
     def emit_statement(self, node: StatementAST) -> Statement:
         raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented statement emitting")
@@ -1289,6 +1354,11 @@ class SemanticModel:
         then_statement = self.emit_statement(node.then_statement)
         else_statement = self.emit_statement(node.else_statement) if node.else_statement else None
 
+        c_type = condition.type
+        if c_type != self.context.boolean_type:
+            message = f"Condition expression for statement must have is ‘bool’ type, got ‘{c_type}’"
+            raise Diagnostic(node.condition.location, DiagnosticSeverity.Error, message)
+
         return ConditionStatement(condition, then_statement, else_statement, node.location)
 
     @multimethod
@@ -1296,6 +1366,11 @@ class SemanticModel:
         condition = self.emit_value(node.condition)
         then_statement = self.emit_statement(node.then_statement)
         else_statement = self.emit_statement(node.else_statement) if node.else_statement else None
+
+        c_type = condition.type
+        if c_type != self.context.boolean_type:
+            message = f"Condition expression for statement must have is ‘bool’ type, got ‘{c_type}’"
+            raise Diagnostic(node.condition.location, DiagnosticSeverity.Error, message)
 
         return WhileStatement(condition, then_statement, else_statement, node.location)
 
@@ -1330,21 +1405,10 @@ class SemanticModel:
                 node.location, DiagnosticSeverity.Error, 'Not implemented object call')
 
         name = node.value.name
-        scope: LexicalScope = self.scopes[node]
-        symbol = scope.resolve(name)
-        if not symbol:
+        func = self.find_function(self.scopes[node], name, arguments)
+        if not func:
             raise Diagnostic(
                 node.location, DiagnosticSeverity.Error, f'Not found function `{name}` in current scope')
-
-        if not isinstance(symbol, Overload):
-            raise Diagnostic(
-                node.location, DiagnosticSeverity.Error, 'Not implemented object call')
-
-        if len(symbol.functions) != 1:
-            raise Diagnostic(
-                node.location, DiagnosticSeverity.Error, 'Not implemented function overloading')
-
-        func = symbol.functions[0]
         return Call(func, arguments, node.location)
 
 

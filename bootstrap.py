@@ -80,6 +80,8 @@ class TokenID(enum.IntEnum):
     Elif = enum.auto()
     Else = enum.auto()
     While = enum.auto()
+    Struct = enum.auto()
+    Class = enum.auto()
 
 
 @dataclass
@@ -268,6 +270,8 @@ class Scanner:
         'elif': TokenID.Elif,
         'else': TokenID.Else,
         'while': TokenID.While,
+        'struct': TokenID.Struct,
+        'class': TokenID.Class,
     }
 
     # Final tuple contains all patterns
@@ -402,6 +406,7 @@ class Scanner:
 
 
 class Parser:
+    MEMBERS_STARTS = (TokenID.Pass, TokenID.Def, TokenID.Class, TokenID.Struct)
     EXPRESSION_STARTS = (TokenID.Number, TokenID.Name, TokenID.LeftParenthesis)
     STATEMENT_STARTS = (TokenID.Pass, TokenID.Return, TokenID.While, TokenID.If) + EXPRESSION_STARTS
 
@@ -488,7 +493,7 @@ class Parser:
             { member }
         """
         members = []
-        while self.match(TokenID.Def):
+        while self.match(*self.MEMBERS_STARTS):
             members.append(self.parse_member())
         return tuple(members)
 
@@ -499,8 +504,73 @@ class Parser:
         """
         if self.match(TokenID.Def):
             return self.parse_function()
+        elif self.match(TokenID.Class):
+            return self.parse_class()
+        elif self.match(TokenID.Struct):
+            return self.parse_struct()
+        elif self.match(TokenID.Pass):
+            return self.parse_pass_member()
 
-        raise NotImplementedError
+        self.match(*self.MEMBERS_STARTS)
+
+    def parse_class(self) -> ClassAST:
+        """
+        class:
+            'class' Name ':' type_members
+        """
+        self.consume(TokenID.Class)
+        tok_name = self.consume(TokenID.Name)
+        members = self.parse_type_members()
+
+        # noinspection PyArgumentList
+        return ClassAST(
+            name=tok_name.value,
+            members=members,
+            location=tok_name.location
+        )
+
+    def parse_struct(self) -> StructAST:
+        """
+        struct:
+            'struct' Name ':' type_members
+        """
+        self.consume(TokenID.Struct)
+        tok_name = self.consume(TokenID.Name)
+        members = self.parse_type_members()
+
+        # noinspection PyArgumentList
+        return StructAST(
+            name=tok_name.value,
+            members=members,
+            location=tok_name.location
+        )
+
+    def parse_type_members(self) -> Sequence[MemberAST]:
+        """
+        type_members:
+            ':' '...' '\n'
+            ':' '\n' Indent members Undent
+        """
+        self.consume(TokenID.Colon)
+
+        if self.match(TokenID.Ellipsis):
+            self.consume(TokenID.Ellipsis)
+            self.consume(TokenID.NewLine)
+            return tuple()
+
+        self.consume(TokenID.NewLine)
+        self.consume(TokenID.Indent)
+        members = self.parse_members()
+        self.consume(TokenID.Undent)
+        return members
+
+    def parse_pass_member(self) -> PassMemberAST:
+        """ pass_member: pass """
+        tok_pass = self.consume(TokenID.Pass)
+        self.consume(TokenID.NewLine)
+
+        # noinspection PyArgumentList
+        return PassMemberAST(location=tok_pass.location)
 
     def parse_function(self) -> FunctionAST:
         """
@@ -819,6 +889,23 @@ class MemberAST(NodeAST):
 
 
 @dataclass(unsafe_hash=True, frozen=True)
+class PassMemberAST(MemberAST):
+    pass
+
+
+@dataclass(unsafe_hash=True, frozen=True)
+class StructAST(MemberAST):
+    name: str
+    members: Sequence[MemberAST]
+
+
+@dataclass(unsafe_hash=True, frozen=True)
+class ClassAST(MemberAST):
+    name: str
+    members: Sequence[MemberAST]
+
+
+@dataclass(unsafe_hash=True, frozen=True)
 class ParameterAST(NodeAST):
     name: str
     type: TypeAST
@@ -983,6 +1070,26 @@ class SemanticContext:
         filename = module_name.replace('.', os.path.sep) + '.orx'
         return os.path.join(path, filename)
 
+    @cached_property
+    def builtins_model(self) -> SemanticModel:
+        return self.load('__builtins__')
+
+    @cached_property
+    def builtins_module(self) -> Module:
+        return self.builtins_model.module
+
+    @cached_property
+    def boolean_type(self) -> BooleanType:
+        return cast(BooleanType, self.builtins_module.scope.resolve('bool'))
+
+    @cached_property
+    def integer_type(self) -> IntegerType:
+        return cast(IntegerType, self.builtins_module.scope.resolve('int'))
+
+    @cached_property
+    def void_type(self) -> VoidType:
+        return cast(VoidType, self.builtins_module.scope.resolve('void'))
+
     def get_module_name(self, filename):
         fullname = os.path.abspath(filename)
         for path in self.paths:
@@ -991,14 +1098,14 @@ class SemanticContext:
 
         raise BootstrapError(f"Not found file `{filename}` in library paths")
 
-    def open(self, filename):
+    def open(self, filename) -> SemanticModel:
         """ Open module from file """
         module_name = self.get_module_name(filename)
 
         with open(filename, 'r', encoding='utf8') as stream:
             return self.__open_source(filename, module_name, stream)
 
-    def load(self, module_name):
+    def load(self, module_name) -> SemanticModel:
         for path in self.paths:
             filename = self.convert_filename(module_name, path)
             try:
@@ -1097,11 +1204,11 @@ class SemanticModel:
     @multimethod
     def resolve_type(self, node: NamedTypeAST) -> Type:
         if node.name == 'void':
-            return VoidType(self.module, node.location)
+            return self.context.void_type
         elif node.name == 'bool':
-            return BooleanType(self.module, node.location)
+            return self.context.boolean_type
         elif node.name == 'int':
-            return IntegerType(self.module, node.location)
+            return self.context.integer_type
 
         raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented type resolving")
 
@@ -1130,6 +1237,18 @@ class SemanticModel:
             scope.append(func_param)
 
         return func
+
+    @multimethod
+    def annotate_symbol(self, node: StructAST, parent: ContainerSymbol) -> Symbol:
+        if self.module == self.context.builtins_module:
+            if node.name == "int":
+                return IntegerType(parent, node.location)
+            elif node.name == "bool":
+                return BooleanType(parent, node.location)
+            elif node.name == "void":
+                return VoidType(parent, node.location)
+
+        raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented struct declaration")
 
     def emit_functions(self, module: ModuleAST):
         for member in module.members:
@@ -1186,12 +1305,12 @@ class SemanticModel:
 
     @multimethod
     def emit_value(self, node: IntegerExpressionAST) -> Value:
-        return IntegerConstant(IntegerType(self.module, node.location), node.value, node.location)
+        return IntegerConstant(self.context.integer_type, node.value, node.location)
 
     @multimethod
     def emit_value(self, node: NamedExpressionAST) -> Value:
         if node.name in ['True', 'False']:
-            return BooleanConstant(BooleanType(self.module, node.location), node.name == 'True', node.location)
+            return BooleanConstant(self.context.boolean_type, node.name == 'True', node.location)
 
         scope = self.scopes[node]
         symbol = scope.resolve(node.name)
@@ -1278,6 +1397,11 @@ class ContainerSymbol(Symbol, abc.ABC):
 
     def __init__(self):
         self.__members = []
+        self.__scope = LexicalScope()
+
+    @property
+    def scope(self) -> LexicalScope:
+        return self.__scope
 
     @property
     def members(self) -> Sequence[OwnedSymbol]:
@@ -1285,6 +1409,7 @@ class ContainerSymbol(Symbol, abc.ABC):
 
     def add_member(self, symbol: OwnedSymbol):
         self.__members.append(symbol)
+        self.__scope.append(symbol)
 
 
 class Value(Symbol, abc.ABC):
@@ -1345,6 +1470,15 @@ class Type(OwnedSymbol, ContainerSymbol, abc.ABC):
     def location(self) -> Location:
         return self.__location
 
+    def __hash__(self):
+        return id(self)
+
+    def __eq__(self, other):
+        return self is other
+
+    def __ne__(self, other):
+        return not (self == other)
+
 
 class VoidType(Type):
     def __init__(self, owner: ContainerSymbol, location: Location):
@@ -1375,6 +1509,13 @@ class FunctionType(Type):
     @property
     def parameters(self) -> Sequence[Type]:
         return self.__parameters
+
+    def __eq__(self, other):
+        if not isinstance(other, FunctionType):
+            return False
+        is_return_equal = self.return_type == other.return_type
+        return is_return_equal and all(
+            param == other_param for param, other_param in zip(self.parameters, other.parameters))
 
     def __str__(self):
         parameters = ', '.join(str(param_type) for param_type in self.parameters)

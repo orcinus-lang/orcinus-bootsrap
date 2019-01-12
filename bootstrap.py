@@ -76,6 +76,10 @@ class TokenID(enum.IntEnum):
     As = enum.auto()
     Then = enum.auto()
     Ellipsis = enum.auto()
+    If = enum.auto()
+    Elif = enum.auto()
+    Else = enum.auto()
+    While = enum.auto()
 
 
 @dataclass
@@ -259,7 +263,11 @@ class Scanner:
         'import': TokenID.Import,
         'from': TokenID.From,
         'as': TokenID.As,
-        'return': TokenID.Return
+        'return': TokenID.Return,
+        'if': TokenID.If,
+        'elif': TokenID.Elif,
+        'else': TokenID.Else,
+        'while': TokenID.While,
     }
 
     # Final tuple contains all patterns
@@ -325,6 +333,9 @@ class Scanner:
                 yield token
                 continue
 
+            elif token.id in self.TRIVIA_TOKENS:
+                continue
+
             if is_new:
                 if whitespace:
                     indent = len(whitespace.value)
@@ -342,16 +353,15 @@ class Scanner:
                     yield Token(TokenID.Undent, '', location)
                     indentions.pop()
 
-            if token.id not in self.TRIVIA_TOKENS:
-                is_new = False
-                is_empty = False
-
-                yield token
+            is_new = False
+            is_empty = False
 
             if token.id in self.OPEN_BRACKETS:
                 level += 1
             elif token.id in self.CLOSE_BRACKETS:
                 level -= 1
+
+            yield token
 
     def tokenize_all(self) -> Iterator[Token]:
         while self.index < self.length:
@@ -393,7 +403,7 @@ class Scanner:
 
 class Parser:
     EXPRESSION_STARTS = (TokenID.Number, TokenID.Name, TokenID.LeftParenthesis)
-    STATEMENT_STARTS = (TokenID.Pass, TokenID.Return) + EXPRESSION_STARTS
+    STATEMENT_STARTS = (TokenID.Pass, TokenID.Return, TokenID.While, TokenID.If) + EXPRESSION_STARTS
 
     def __init__(self, filename, stream):
         self.tokens = list(Scanner(filename, stream))
@@ -577,11 +587,17 @@ class Parser:
             pass_statement
             return_statement
             expression_statement
+            condition_statement
+            while_statement
         """
         if self.match(TokenID.Pass):
             return self.parse_pass_statement()
         elif self.match(TokenID.Return):
             return self.parse_return_statement()
+        elif self.match(TokenID.If):
+            return self.parse_condition_statement()
+        elif self.match(TokenID.While):
+            return self.parse_while_statement()
         elif self.match(*self.EXPRESSION_STARTS):
             return self.parse_expression_statement()
 
@@ -607,8 +623,70 @@ class Parser:
         # noinspection PyArgumentList
         return ReturnStatementAST(value=value, location=tok_return.location)
 
+    def parse_else_statement(self):
+        """
+        else_statement:
+            'else' ':' '\n' block_statement
+        """
+        self.consume(TokenID.Else)
+        self.consume(TokenID.Colon)
+        self.consume(TokenID.NewLine)
+        return self.parse_block_statement()
+
+    def parse_condition_statement(self, token_id: TokenID = TokenID.If) -> StatementAST:
+        """
+        condition_statement:
+            'if' expression ':' '\n' block_statement            ⏎
+                { 'elif' expression ':' '\n' block_statement }  ⏎
+                [ else_statement ]
+        """
+        tok_if = self.consume(token_id)
+        condition = self.parse_expression()
+        self.consume(TokenID.Colon)
+        self.consume(TokenID.NewLine)
+        then_statement = self.parse_block_statement()
+
+        else_statement = None
+        if self.match(TokenID.Else):
+            else_statement = self.parse_else_statement()
+        elif self.match(TokenID.Elif):
+            else_statement = self.parse_condition_statement(TokenID.Elif)
+
+        # noinspection PyArgumentList
+        return ConditionStatementAST(
+            condition=condition,
+            then_statement=then_statement,
+            else_statement=else_statement,
+            location=tok_if.location
+        )
+
+    def parse_while_statement(self) -> StatementAST:
+        """
+        while_statement:
+            'while' expression ':' '\n' block_statement     ⏎
+                [ 'else' ':' '\n' block_statement ]
+        """
+        tok_while = self.consume(TokenID.While)
+        condition = self.parse_expression()
+        self.consume(TokenID.Colon)
+        self.consume(TokenID.NewLine)
+        then_statement = self.parse_block_statement()
+        else_statement = self.parse_else_statement() if self.match(TokenID.Else) else None
+
+        # noinspection PyArgumentList
+        return WhileStatementAST(
+            condition=condition,
+            then_statement=then_statement,
+            else_statement=else_statement,
+            location=tok_while.location
+        )
+
     def parse_expression_statement(self) -> StatementAST:
-        raise NotImplementedError
+        value = self.parse_expression()
+        self.consume(TokenID.NewLine)
+
+        # noinspection PyArgumentList
+        return ExpressionStatementAST(value=value, location=value.location)
 
     def parse_arguments(self) -> Sequence[ExpressionAST]:
         """
@@ -651,6 +729,7 @@ class Parser:
             atom = self.parse_parenthesis_expression()
         else:
             self.match(*self.EXPRESSION_STARTS)
+            raise NotImplementedError  # Make linter happy
 
         if self.match(TokenID.LeftParenthesis):
             return self.parse_call_expression(atom)
@@ -774,6 +853,25 @@ class ReturnStatementAST(StatementAST):
 
 
 @dataclass(unsafe_hash=True, frozen=True)
+class ConditionStatementAST(StatementAST):
+    condition: ExpressionAST
+    then_statement: StatementAST
+    else_statement: Optional[StatementAST]
+
+
+@dataclass(unsafe_hash=True, frozen=True)
+class WhileStatementAST(StatementAST):
+    condition: ExpressionAST
+    then_statement: StatementAST
+    else_statement: Optional[StatementAST]
+
+
+@dataclass(unsafe_hash=True, frozen=True)
+class ExpressionStatementAST(StatementAST):
+    value: ExpressionAST
+
+
+@dataclass(unsafe_hash=True, frozen=True)
 class ExpressionAST(NodeAST):
     pass
 
@@ -845,17 +943,14 @@ class LexicalScope(collections.abc.MutableMapping):
         return symbol
 
     def __setitem__(self, name: str, symbol: NamedSymbol) -> None:
-        existed_symbol = self.get(name)
-        if not existed_symbol:
-            self.__defined[name] = symbol = Overload(name, symbol) if isinstance(symbol, Function) else symbol
-            return
-
-        elif isinstance(existed_symbol, Overload):
-            if isinstance(symbol, Function):
-                existed_symbol.append(symbol)
-                return
-
-        raise Diagnostic(symbol.location, DiagnosticSeverity.Error, f"Already defined symbol with name {name}")
+        try:
+            existed_symbol = self.__defined[name]
+        except KeyError:
+            self.__defined[name] = Overload(name, symbol) if isinstance(symbol, Function) else symbol
+        else:
+            if not isinstance(existed_symbol, Overload) or not isinstance(symbol, Function):
+                raise Diagnostic(symbol.location, DiagnosticSeverity.Error, f"Already defined symbol with name {name}")
+            existed_symbol.append(symbol)
 
     def __delitem__(self, name: str):
         del self.__resolved[name]
@@ -963,12 +1058,16 @@ class SemanticModel:
             self.annotate_recursive_scope(child, scope)
 
     @multimethod
-    def annotate_scope(self, node: NodeAST, parent: LexicalScope) -> LexicalScope:
+    def annotate_scope(self, _: NodeAST, parent: LexicalScope) -> LexicalScope:
         return parent
 
     @multimethod
-    def annotate_scope(self, node: ModuleAST, parent=None) -> LexicalScope:
+    def annotate_scope(self, _1: ModuleAST, _2=None) -> LexicalScope:
         return LexicalScope()
+
+    @multimethod
+    def annotate_scope(self, _: FunctionAST, parent: LexicalScope) -> LexicalScope:
+        return LexicalScope(parent)
 
     def declare_symbol(self, node: NodeAST, parent: ContainerSymbol = None):
         symbol = self.annotate_symbol(node, parent)
@@ -1023,12 +1122,14 @@ class SemanticModel:
         return_type = self.resolve_type(node.return_type)
         func_type = FunctionType(self.module, parameters, return_type, node.location)
         func = Function(parent, node.name, func_type, node.location)
+        scope = self.scopes[node]
 
         for node_param, func_param in zip(node.parameters, func.parameters):
             func_param.name = node_param.name
             func_param.location = node_param.location
 
             self.symbols[node_param] = func_param
+            scope[node_param.name] = func_param
 
         return func
 
@@ -1061,8 +1162,25 @@ class SemanticModel:
         return ReturnStatement(value, node.location)
 
     @multimethod
-    def emit_statement(self, node: ExpressionAST) -> Statement:
-        raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented value emitting")
+    def emit_statement(self, node: ExpressionStatementAST) -> Statement:
+        value = self.emit_value(node.value)
+        return ExpressionStatement(value)
+
+    @multimethod
+    def emit_statement(self, node: ConditionStatementAST) -> Statement:
+        condition = self.emit_value(node.condition)
+        then_statement = self.emit_statement(node.then_statement)
+        else_statement = self.emit_statement(node.else_statement) if node.else_statement else None
+
+        return ConditionStatement(condition, then_statement, else_statement, node.location)
+
+    @multimethod
+    def emit_statement(self, node: WhileStatementAST) -> Statement:
+        condition = self.emit_value(node.condition)
+        then_statement = self.emit_statement(node.then_statement)
+        else_statement = self.emit_statement(node.else_statement) if node.else_statement else None
+
+        return WhileStatement(condition, then_statement, else_statement, node.location)
 
     @multimethod
     def emit_value(self, node: ExpressionAST) -> Value:
@@ -1071,6 +1189,23 @@ class SemanticModel:
     @multimethod
     def emit_value(self, node: IntegerExpressionAST) -> Value:
         return IntegerConstant(IntegerType(self.module, node.location), node.value, node.location)
+
+    @multimethod
+    def emit_value(self, node: NamedExpressionAST) -> Value:
+        if node.name in ['True', 'False']:
+            return BooleanConstant(BooleanType(self.module, node.location), node.name == 'True', node.location)
+
+        scope = self.scopes[node]
+        try:
+            symbol = scope[node.name]
+        except KeyError:
+            raise Diagnostic(
+                node.location, DiagnosticSeverity.Error, f"Not found symbol `{node.name} in current scope`")
+        else:
+            if isinstance(symbol, Parameter):
+                return symbol
+
+        raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented value emitting")
 
     @multimethod
     def emit_value(self, node: CallExpressionAST) -> Value:
@@ -1173,7 +1308,7 @@ class Value(Symbol, abc.ABC):
 
     @location.setter
     def location(self, value: Location):
-        self.__location = locals()
+        self.__location = value
 
 
 class Module(NamedSymbol, ContainerSymbol):
@@ -1352,6 +1487,16 @@ class IntegerConstant(Value):
         return str(self.value)
 
 
+class BooleanConstant(Value):
+    def __init__(self, value_type: BooleanType, value: bool, location: Location):
+        super(BooleanConstant, self).__init__(value_type, location)
+
+        self.value = value
+
+    def __str__(self):
+        return "True" if self.value else "False"
+
+
 class Call(Value):
     def __init__(self, func: Function, arguments: Sequence[Value], location: Location):
         super(Call, self).__init__(func.return_type, location)
@@ -1385,6 +1530,31 @@ class ReturnStatement(Statement):
         super(ReturnStatement, self).__init__(location)
 
         self.value = value
+
+
+class ExpressionStatement(Statement):
+    def __init__(self, value: Value):
+        super(ExpressionStatement, self).__init__(value.location)
+
+        self.value = value
+
+
+class ConditionStatement(Statement):
+    def __init__(self, condition: Value, then_statement: Statement, else_statement: Optional[Statement], location):
+        super(ConditionStatement, self).__init__(location)
+
+        self.condition = condition
+        self.then_statement = then_statement
+        self.else_statement = else_statement
+
+
+class WhileStatement(Statement):
+    def __init__(self, condition: Value, then_statement: Statement, else_statement: Optional[Statement], location):
+        super(WhileStatement, self).__init__(location)
+
+        self.condition = condition
+        self.then_statement = then_statement
+        self.else_statement = else_statement
 
 
 class LazyDict(dict):
@@ -1449,6 +1619,7 @@ class ModuleCodegen:
         llvm_params = [self.llvm_types[param.type] for param in func.parameters]
         llvm_type = ir.FunctionType(llvm_return, llvm_params)
         llvm_func = ir.Function(self.llvm_module, llvm_type, f'ORX_{func.name}')
+        llvm_func.linkage = 'internal'
 
         for llvm_arg, param in zip(llvm_func.args, func.parameters):
             llvm_arg.name = param.name
@@ -1506,6 +1677,7 @@ class FunctionCodegen:
         self.parent = parent
         self.function = func
         self.llvm_function = llvm_func
+        self.llvm_parameters = {param: llvm_arg for param, llvm_arg in zip(func.parameters, llvm_func.args)}
 
         llvm_entry = llvm_func.append_basic_block('entry')
         self.llvm_builder = ir.IRBuilder(llvm_entry)
@@ -1523,32 +1695,121 @@ class FunctionCodegen:
         return self.parent.llvm_functions
 
     @multimethod
-    def emit_statement(self, statement: Statement):
+    def emit_statement(self, statement: Statement) -> bool:
+        """
+
+        :param statement:
+        :return: True, if statement is terminated
+        """
         raise Diagnostic(statement.location, DiagnosticSeverity.Error, "Not implemented statement conversion to LLVM")
 
     @multimethod
-    def emit_statement(self, statement: BlockStatement):
+    def emit_statement(self, statement: BlockStatement) -> bool:
         for child in statement.statements:
-            self.emit_statement(child)
+            if self.emit_statement(child):
+                return True
 
     @multimethod
-    def emit_statement(self, statement: PassStatement):
-        pass  # :D
+    def emit_statement(self, statement: PassStatement) -> bool:
+        return False  # :D
 
     @multimethod
-    def emit_statement(self, statement: ReturnStatement):
+    def emit_statement(self, statement: ReturnStatement) -> bool:
         if statement.value:
             llvm_value = self.emit_value(statement.value)
             self.llvm_builder.ret(llvm_value)
         else:
             self.llvm_builder.ret_void()
+        return True
+
+    @multimethod
+    def emit_statement(self, statement: ExpressionStatement) -> bool:
+        self.emit_value(statement.value)
+        return False
+
+    @multimethod
+    def emit_statement(self, statement: ConditionStatement) -> bool:
+        llvm_cond = self.emit_value(statement.condition)
+
+        with self.llvm_builder.if_else(llvm_cond) as (then, otherwise):
+            # emit instructions for when the predicate is true
+            with then:
+                is_terminated = self.emit_statement(statement.then_statement)
+
+            # emit instructions for when the predicate is false
+            with otherwise:
+                if statement.else_statement:
+                    is_terminated = self.emit_statement(statement.else_statement) and is_terminated
+                else:
+                    is_terminated = False
+
+        if is_terminated:
+            self.llvm_function.blocks.remove(self.llvm_builder.basic_block)
+        return is_terminated
+
+    @multimethod
+    def emit_statement(self, statement: WhileStatement) -> bool:
+        # condition block
+        llvm_cond_block = self.llvm_builder.append_basic_block('while.cond')
+        self.llvm_builder.branch(llvm_cond_block)
+        self.llvm_builder.position_at_end(llvm_cond_block)
+        llvm_cond = self.emit_value(statement.condition)
+        if statement.else_statement:
+            with self.llvm_builder.goto_entry_block():
+                llvm_flag = self.llvm_builder.alloca(ir.IntType(1))
+            self.llvm_builder.store(ir.Constant(ir.IntType(1), False), llvm_flag)
+        else:
+            llvm_flag = None
+
+        # then block
+        llvm_then_block = self.llvm_builder.append_basic_block('while.then')
+        self.llvm_builder.position_at_end(llvm_then_block)
+        if statement.else_statement:
+            self.llvm_builder.store(ir.Constant(ir.IntType(1), True), llvm_flag)
+        self.emit_statement(statement.then_statement)
+        if not self.llvm_builder.block.is_terminated:
+            self.llvm_builder.branch(llvm_cond_block)
+
+        # continue block
+        llvm_continue_block = self.llvm_builder.append_basic_block('while.continue')
+
+        # condition -> then | continue
+        self.llvm_builder.position_at_end(llvm_cond_block)
+        self.llvm_builder.cbranch(llvm_cond, llvm_then_block, llvm_continue_block)
+
+        if statement.else_statement:
+            llvm_else_block = self.llvm_builder.append_basic_block('while.else')
+
+            self.llvm_builder.position_at_end(llvm_else_block)
+            self.emit_statement(statement.else_statement)
+
+            llvm_next_block = self.llvm_builder.append_basic_block('while.next')
+            if not self.llvm_builder.block.is_terminated:
+                self.llvm_builder.branch(llvm_next_block)
+
+            self.llvm_builder.position_at_end(llvm_continue_block)
+            llvm_flag = self.llvm_builder.load(llvm_flag)
+            self.llvm_builder.cbranch(llvm_flag, llvm_else_block, llvm_next_block)
+
+            self.llvm_builder.position_at_end(llvm_next_block)
+        else:
+            self.llvm_builder.position_at_end(llvm_continue_block)
 
     @multimethod
     def emit_value(self, value: Value):
         raise Diagnostic(value.location, DiagnosticSeverity.Error, "Not implemented value conversion to LLVM")
 
     @multimethod
+    def emit_value(self, value: Parameter):
+        return self.llvm_parameters[value]
+
+    @multimethod
     def emit_value(self, value: IntegerConstant):
+        llvm_type = self.llvm_types[value.type]
+        return ir.Constant(llvm_type, value.value)
+
+    @multimethod
+    def emit_value(self, value: BooleanConstant):
         llvm_type = self.llvm_types[value.type]
         return ir.Constant(llvm_type, value.value)
 

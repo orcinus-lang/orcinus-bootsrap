@@ -9,6 +9,7 @@ import sys
 import warnings as pywarnings
 
 import pytest
+import logging
 
 PYTHON_EXECUTABLE = sys.executable
 OPT_EXECUTABLE = 'opt-6.0'
@@ -34,6 +35,7 @@ def execute(command, *, input=None, is_binary=False):
         stdout, stderr = stdout.decode('utf-8').rstrip(), stderr.decode('utf-8').rstrip()
     if process.returncode:
         error = stderr if isinstance(stderr, str) else stderr.decode('utf-8')
+        sys.stderr.write(error)
     return process.returncode, stdout, stderr
 
 

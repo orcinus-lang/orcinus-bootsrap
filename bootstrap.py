@@ -19,7 +19,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass
-from typing import Sequence, Iterator, Optional, cast, Mapping
+from typing import Sequence, Iterator, Optional, cast, Mapping, Tuple
 
 from colorlog import ColoredFormatter
 from llvmlite import binding
@@ -59,6 +59,10 @@ class TokenID(enum.IntEnum):
     Number = enum.auto()
     LeftParenthesis = enum.auto()
     RightParenthesis = enum.auto()
+    LeftSquare = enum.auto()
+    RightSquare = enum.auto()
+    LeftCurly = enum.auto()
+    RightCurly = enum.auto()
     Dot = enum.auto()
     Comma = enum.auto()
     Colon = enum.auto()
@@ -247,6 +251,10 @@ class Scanner:
         (r'\(', TokenID.LeftParenthesis),
         (r'\)', TokenID.RightParenthesis),
         (r'\.\.\.', TokenID.Ellipsis),
+        ('\[', TokenID.LeftSquare),
+        ('\]', TokenID.RightSquare),
+        ('\{', TokenID.LeftCurly),
+        ('\}', TokenID.RightCurly),
         (r'\.', TokenID.Dot),
         (r',', TokenID.Comma),
         (r':', TokenID.Colon),
@@ -481,12 +489,65 @@ class Parser:
     def parse_type(self) -> TypeAST:
         """
         type:
-            name
+            atom_type { generic_arguments }
+        """
+        result_type = self.parse_atom_type()
+        while self.match(TokenID.LeftSquare):
+            arguments = self.parse_generic_arguments()
+
+            # noinspection PyArgumentList
+            result_type = ParameterizedTypeAST(type=result_type, arguments=arguments, location=result_type.location)
+        return result_type
+
+    def parse_atom_type(self) -> TypeAST:
+        """
+        atom_type:
+            Name
         """
         tok_name = self.consume(TokenID.Name)
 
         # noinspection PyArgumentList
         return NamedTypeAST(name=tok_name.value, location=tok_name.location)
+
+    def parse_generic_parameters(self) -> Sequence[GenericParameterAST]:
+        """
+        generic_parameters
+            : [ '[' generic_parameter { ',' generic_parameter } ] ']' ]
+        """
+        if not self.match(TokenID.LeftSquare):
+            return tuple()
+
+        self.consume(TokenID.LeftSquare),
+        parameters = [self.parse_generic_parameter()]
+        while self.match(TokenID.Comma):
+            self.consume(TokenID.Comma)
+            parameters.append(self.parse_generic_parameter())
+        self.consume(TokenID.RightSquare)
+
+        return tuple(parameters)
+
+    def parse_generic_parameter(self) -> GenericParameterAST:
+        """
+        generic_parameter
+            Name
+        """
+        tok_name = self.consume(TokenID.Name)
+
+        # noinspection PyArgumentList
+        return GenericParameterAST(name=tok_name.value, location=tok_name.location)
+
+    def parse_generic_arguments(self) -> Sequence[TypeAST]:
+        """
+        generic_arguments:
+            '[' type { ',' type} ']'
+        """
+        self.consume(TokenID.LeftSquare)
+        arguments = [self.parse_type()]
+        while self.match(TokenID.Comma):
+            self.consume(TokenID.Comma)
+            arguments.append(self.parse_type())
+        self.consume(TokenID.RightSquare)
+        return tuple(arguments)
 
     def parse_members(self) -> Sequence[MemberAST]:
         """
@@ -517,15 +578,17 @@ class Parser:
     def parse_class(self) -> ClassAST:
         """
         class:
-            'class' Name ':' type_members
+            'class' Name generic_parameters ':' type_members
         """
         self.consume(TokenID.Class)
         tok_name = self.consume(TokenID.Name)
+        generic_parameters = self.parse_generic_parameters()
         members = self.parse_type_members()
 
         # noinspection PyArgumentList
         return ClassAST(
             name=tok_name.value,
+            generic_parameters=generic_parameters,
             members=members,
             location=tok_name.location
         )
@@ -533,15 +596,17 @@ class Parser:
     def parse_struct(self) -> StructAST:
         """
         struct:
-            'struct' Name ':' type_members
+            'struct' Name generic_parameters ':' type_members
         """
         self.consume(TokenID.Struct)
         tok_name = self.consume(TokenID.Name)
         members = self.parse_type_members()
+        generic_parameters = self.parse_generic_parameters()
 
         # noinspection PyArgumentList
         return StructAST(
             name=tok_name.value,
+            generic_parameters=generic_parameters,
             members=members,
             location=tok_name.location
         )
@@ -554,8 +619,7 @@ class Parser:
         """
         self.consume(TokenID.Colon)
 
-        if self.match(TokenID.Ellipsis):
-            self.consume(TokenID.Ellipsis)
+        if self.try_consume(TokenID.Ellipsis):
             self.consume(TokenID.NewLine)
             return tuple()
 
@@ -576,10 +640,11 @@ class Parser:
     def parse_function(self) -> FunctionAST:
         """
         function:
-            'def' Name '(' parameters ')' [ '->' type ] ':' NewLine function_statement
+            'def' Name generic_parameters '(' parameters ')' [ '->' type ] ':' NewLine function_statement
         """
         self.consume(TokenID.Def)
         tok_name = self.consume(TokenID.Name)
+        generic_parameters = self.parse_generic_parameters()
         self.consume(TokenID.LeftParenthesis)
         parameters = self.parse_parameters()
         self.consume(TokenID.RightParenthesis)
@@ -594,6 +659,7 @@ class Parser:
         # noinspection PyArgumentList
         return FunctionAST(
             name=tok_name.value,
+            generic_parameters=generic_parameters,
             parameters=parameters,
             return_type=return_type,
             statement=statement,
@@ -632,6 +698,7 @@ class Parser:
             NewLine block_statement
         """
         if self.try_consume(TokenID.Ellipsis):
+            self.consume(TokenID.NewLine)
             return None
 
         self.consume(TokenID.NewLine)
@@ -791,20 +858,24 @@ class Parser:
              name_expression
              call_expression
              parenthesis_expression
+             subscribe_expression
         """
         if self.match(TokenID.Number):
-            atom = self.parse_number_expression()
+            expression = self.parse_number_expression()
         elif self.match(TokenID.Name):
-            atom = self.parse_name_expression()
+            expression = self.parse_name_expression()
         elif self.match(TokenID.LeftParenthesis):
-            atom = self.parse_parenthesis_expression()
+            expression = self.parse_parenthesis_expression()
         else:
             self.match(*self.EXPRESSION_STARTS)
             raise NotImplementedError  # Make linter happy
 
-        if self.match(TokenID.LeftParenthesis):
-            return self.parse_call_expression(atom)
-        return atom
+        while self.match(TokenID.LeftParenthesis, TokenID.LeftSquare):
+            if self.match(TokenID.LeftParenthesis):
+                expression = self.parse_call_expression(expression)
+            elif self.match(TokenID.LeftSquare):
+                expression = self.parse_subscribe_expression(expression)
+        return expression
 
     def parse_number_expression(self) -> ExpressionAST:
         """
@@ -838,6 +909,19 @@ class Parser:
 
         # noinspection PyArgumentList
         return CallExpressionAST(value=value, arguments=arguments, location=location)
+
+    def parse_subscribe_expression(self, value: ExpressionAST) -> ExpressionAST:
+        """
+        subscribe_expression
+            expression '[' arguments ']'
+        """
+        self.consume(TokenID.LeftSquare)
+        arguments = self.parse_arguments()
+        tok_close = self.consume(TokenID.RightSquare)
+        location = value.location + tok_close.location
+
+        # noinspection PyArgumentList
+        return SubscribeExpressionAST(value=value, arguments=arguments, location=location)
 
     def parse_parenthesis_expression(self) -> ExpressionAST:
         """
@@ -880,6 +964,17 @@ class TypeAST(NodeAST):
 
 
 @dataclass(unsafe_hash=True, frozen=True)
+class ParameterizedTypeAST(TypeAST):
+    type: TypeAST
+    arguments: Sequence[TypeAST]
+
+
+@dataclass(unsafe_hash=True, frozen=True)
+class GenericParameterAST(NodeAST):
+    name: str
+
+
+@dataclass(unsafe_hash=True, frozen=True)
 class NamedTypeAST(TypeAST):
     name: str
 
@@ -897,6 +992,7 @@ class PassMemberAST(MemberAST):
 @dataclass(unsafe_hash=True, frozen=True)
 class StructAST(MemberAST):
     name: str
+    generic_parameters: Sequence[GenericParameterAST]
     members: Sequence[MemberAST]
 
 
@@ -904,6 +1000,7 @@ class StructAST(MemberAST):
 class ClassAST(MemberAST):
     name: str
     members: Sequence[MemberAST]
+    generic_parameters: Sequence[GenericParameterAST]
 
 
 @dataclass(unsafe_hash=True, frozen=True)
@@ -915,6 +1012,7 @@ class ParameterAST(NodeAST):
 @dataclass(unsafe_hash=True, frozen=True)
 class FunctionAST(MemberAST):
     name: str
+    generic_parameters: Sequence[GenericParameterAST]
     parameters: Sequence[ParameterAST]
     return_type: TypeAST
     statement: Optional[StatementAST]
@@ -976,6 +1074,12 @@ class NamedExpressionAST(ExpressionAST):
 
 @dataclass(unsafe_hash=True, frozen=True)
 class CallExpressionAST(ExpressionAST):
+    value: ExpressionAST
+    arguments: Sequence[ExpressionAST]
+
+
+@dataclass(unsafe_hash=True, frozen=True)
+class SubscribeExpressionAST(ExpressionAST):
     value: ExpressionAST
     arguments: Sequence[ExpressionAST]
 
@@ -1211,7 +1315,27 @@ class SemanticModel:
         elif node.name == 'int':
             return self.context.integer_type
 
-        raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented type resolving")
+        symbol = self.scopes[node].resolve(node.name)
+        if isinstance(symbol, Type):
+            return symbol
+
+        raise Diagnostic(
+            node.location, DiagnosticSeverity.Error, f"Not found symbol `{node.name} in current scope`")
+
+    @multimethod
+    def resolve_type(self, node: ParameterizedTypeAST) -> Type:
+        instance_type = self.resolve_type(node.type)
+        arguments = [self.resolve_type(arg) for arg in node.arguments]
+        return instance_type.instantiate(self.module, arguments, node.location)
+
+    def annotate_generics(self, scope: LexicalScope, generic_parameters: Sequence[GenericParameterAST]):
+        parameters = []
+        for generic_node in generic_parameters:
+            generic = GenericType(self.module, generic_node.name, generic_node.location)
+
+            scope.append(generic)
+            parameters.append(generic)
+        return parameters
 
     @multimethod
     def annotate_symbol(self, node: NodeAST, parent: ContainerSymbol) -> Symbol:
@@ -1224,11 +1348,12 @@ class SemanticModel:
 
     @multimethod
     def annotate_symbol(self, node: FunctionAST, parent: ContainerSymbol) -> Function:
+        scope = self.scopes[node]
+        generic_parameters = self.annotate_generics(scope, node.generic_parameters)
         parameters = [self.resolve_type(param.type) for param in node.parameters]
         return_type = self.resolve_type(node.return_type)
         func_type = FunctionType(self.module, parameters, return_type, node.location)
-        func = Function(parent, node.name, func_type, node.location)
-        scope = self.scopes[node]
+        func = Function(parent, node.name, func_type, node.location, generic_parameters=generic_parameters)
 
         for node_param, func_param in zip(node.parameters, func.parameters):
             func_param.name = node_param.name
@@ -1240,7 +1365,7 @@ class SemanticModel:
         return func
 
     @multimethod
-    def annotate_symbol(self, node: StructAST, parent: ContainerSymbol) -> Symbol:
+    def annotate_symbol(self, node: StructAST, parent: ContainerSymbol) -> Type:
         if self.module == self.context.builtins_module:
             if node.name == "int":
                 return IntegerType(parent, node.location)
@@ -1249,7 +1374,17 @@ class SemanticModel:
             elif node.name == "void":
                 return VoidType(parent, node.location)
 
-        raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented struct declaration")
+        generic_parameters = self.annotate_generics(self.scopes[node], node.generic_parameters)
+        return StructType(parent, node.name, node.location, generic_parameters=generic_parameters)
+
+    @multimethod
+    def annotate_symbol(self, node: ClassAST, parent: ContainerSymbol) -> Type:
+        generic_parameters = self.annotate_generics(self.scopes[node], node.generic_parameters)
+        return ClassType(parent, node.name, node.location, generic_parameters=generic_parameters)
+
+    @multimethod
+    def annotate_symbol(self, node: GenericParameterAST, parent: ContainerSymbol) -> Symbol:
+        return GenericType(node.name, node.location)
 
     def emit_functions(self, module: ModuleAST):
         for member in module.members:
@@ -1277,7 +1412,7 @@ class SemanticModel:
         return functions
 
     @staticmethod
-    def check_function(func: Function, arguments: Sequence[Value]) -> Optional[int]:
+    def check_naive_function(func: Function, arguments: Sequence[Value]) -> Tuple[Optional[int], Function]:
         """
         Returns:
 
@@ -1289,26 +1424,49 @@ class SemanticModel:
         :return:
         """
         if len(func.parameters) != len(arguments):
-            return None
+            return None, func
 
         priority = 0
         for param, arg in zip(func.parameters, arguments):
             if arg.type != param.type:
-                return None
+                return None, func
             priority += 2
-        return priority
+        return priority, func
 
-    def find_function(self, scope: LexicalScope, name: str, arguments: Sequence[Value]) -> Optional[Function]:
+    def check_generic_function(self, func: Function, arguments: Sequence[Value], location: Location) \
+            -> Tuple[Optional[int], Function]:
+        if len(func.parameters) != len(arguments):
+            return None, func
+
+        context = InferenceContext()
+        instance_types = [context.add_generic_parameter(parameter) for parameter in func.generic_parameters]
+        parameter_types = [context.add_type(parameter.type) for parameter in func.parameters]
+        argument_types = [context.add_type(arg.type) for arg in arguments]
+        for param_type, arg_type in zip(parameter_types, argument_types):
+            context.unify(param_type, arg_type)
+
+        generic_arguments = [var_type.instantiate(self.module) for var_type in instance_types]
+        instance = func.instantiate(self.module, generic_arguments, location)
+        return -1, instance
+
+    def check_function(self, func: Function, arguments: Sequence[Value], location: Location) \
+            -> Optional[Tuple[int, Function]]:
+        if func.is_generic:
+            return self.check_generic_function(func, arguments, location)
+        return self.check_naive_function(func, arguments)
+
+    def find_function(self, scope: LexicalScope, name: str, arguments: Sequence[Value], location: Location) \
+            -> Optional[Function]:
         # find candidates
-        functions = self.get_functions(scope, name, arguments[0] if arguments else None)
+        functions = self.get_functions(scope, name, arguments[0].type if arguments else None)
 
         # check candidates
         counter = itertools.count()
         candidates = []
         for func in functions:
-            priority = self.check_function(func, arguments)
+            priority, instance = self.check_function(func, arguments, location)
             if priority is not None:
-                heapq.heappush(candidates, (priority, next(counter), func))
+                heapq.heappush(candidates, (priority, next(counter), instance))
 
         # pop all function with minimal priority
         functions = []
@@ -1356,7 +1514,7 @@ class SemanticModel:
 
         c_type = condition.type
         if c_type != self.context.boolean_type:
-            message = f"Condition expression for statement must have is ‘bool’ type, got ‘{c_type}’"
+            message = f"Condition expression for statement must have ‘bool’ type, got ‘{c_type}’"
             raise Diagnostic(node.condition.location, DiagnosticSeverity.Error, message)
 
         return ConditionStatement(condition, then_statement, else_statement, node.location)
@@ -1369,7 +1527,7 @@ class SemanticModel:
 
         c_type = condition.type
         if c_type != self.context.boolean_type:
-            message = f"Condition expression for statement must have is ‘bool’ type, got ‘{c_type}’"
+            message = f"Condition expression for statement must have ‘bool’ type, got ‘{c_type}’"
             raise Diagnostic(node.condition.location, DiagnosticSeverity.Error, message)
 
         return WhileStatement(condition, then_statement, else_statement, node.location)
@@ -1384,32 +1542,281 @@ class SemanticModel:
 
     @multimethod
     def emit_value(self, node: NamedExpressionAST) -> Value:
+        value = self.emit_symbol(node)
+        if isinstance(value, Value):
+            return value
+
+        raise Diagnostic(node.location, DiagnosticSeverity.Error, "Required value, but got another object")
+
+    @multimethod
+    def emit_value(self, node: CallExpressionAST) -> Value:
+        arguments = [self.emit_value(arg) for arg in node.arguments]
+
+        symbol = self.emit_symbol(node.value)
+
+        # function call
+        if isinstance(symbol, Overload):
+            func = self.find_function(self.scopes[node], symbol.name, arguments, node.location)
+            return CallInstruction(func, arguments, node.location)
+
+        # type instance instantiate
+        elif isinstance(symbol, Type):
+            return NewInstruction(symbol, arguments, node.location)
+
+        raise Diagnostic(node.location, DiagnosticSeverity.Error, f'Not found function for call')
+
+    @multimethod
+    def emit_symbol(self, node: ExpressionAST) -> Symbol:
+        raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented symbol emitting")
+
+    @multimethod
+    def emit_symbol(self, node: NamedExpressionAST) -> Symbol:
         if node.name in ['True', 'False']:
             return BooleanConstant(self.context.boolean_type, node.name == 'True', node.location)
+        elif node.name == 'void':
+            return self.context.void_type
+        elif node.name == 'bool':
+            return self.context.boolean_type
+        elif node.name == 'int':
+            return self.context.integer_type
 
         scope = self.scopes[node]
         symbol = scope.resolve(node.name)
         if not symbol:
             raise Diagnostic(
                 node.location, DiagnosticSeverity.Error, f"Not found symbol `{node.name} in current scope`")
-        elif isinstance(symbol, Parameter):
-            return symbol
-
-        raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented value emitting")
+        return symbol
 
     @multimethod
-    def emit_value(self, node: CallExpressionAST) -> Value:
-        arguments = [self.emit_value(arg) for arg in node.arguments]
-        if not isinstance(node.value, NamedExpressionAST):
-            raise Diagnostic(
-                node.location, DiagnosticSeverity.Error, 'Not implemented object call')
+    def emit_symbol(self, node: SubscribeExpressionAST) -> Symbol:
+        symbol = self.emit_symbol(node.value)
+        arguments = [self.emit_symbol(arg) for arg in node.arguments]
 
-        name = node.value.name
-        func = self.find_function(self.scopes[node], name, arguments)
-        if not func:
-            raise Diagnostic(
-                node.location, DiagnosticSeverity.Error, f'Not found function `{name}` in current scope')
-        return Call(func, arguments, node.location)
+        if isinstance(symbol, Type):
+            return symbol.instantiate(self.module, arguments, node.location)
+        raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented symbol emitting")
+
+
+class InstantiateContext:
+    def __init__(self, module: Module):
+        self.module = module
+        self.__mapping = {}
+
+    def aggregate(self, generic_parameters, generic_arguments):
+        for param, arg in zip(generic_parameters, generic_arguments):
+            self.__mapping[param] = arg
+
+    def instantiate(self, generic: Type, location: Location):
+        if generic in self.__mapping:
+            return self.__mapping[generic]
+
+        if isinstance(generic, FunctionType):  # TODO: Make generic for function type!
+            parameters = [self.instantiate(param, location) for param in generic.parameters]
+            return_type = self.instantiate(generic.return_type, location)
+            result_type = FunctionType(self.module, parameters, return_type, generic.location)
+
+        elif generic.generic_parameters:
+            generic_arguments = [self.instantiate(arg, location) for arg in generic.generic_parameters]
+            result_type = generic.instantiate(self.module, generic_arguments, location)
+
+        elif generic.generic_arguments:
+            generic_arguments = [self.instantiate(arg, location) for arg in generic.generic_arguments]
+            result_type = generic.instantiate(self.module, generic_arguments, location)
+        else:
+            result_type = generic
+
+        self.__mapping[generic] = result_type
+        return result_type
+
+
+class InferenceType(abc.ABC):
+    def __init__(self, location: Location):
+        self.location = location
+
+    @abc.abstractmethod
+    def prune(self) -> InferenceType:
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def instantiate(self, module: Module) -> Type:
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def __str__(self):
+        raise NotImplementedError
+
+
+class InferenceVariable(InferenceType):
+    def __init__(self, name: str, location: Location):
+        super(InferenceVariable, self).__init__(location)
+
+        self.__name = name
+        self.__instance = None
+
+    @property
+    def name(self):
+        return self.__name
+
+    @property
+    def instance(self) -> InferenceType:
+        return self.__instance
+
+    @instance.setter
+    def instance(self, value: InferenceType):
+        self.__instance = value
+
+    def prune(self) -> InferenceType:
+        if self.instance:
+            self.instance = self.instance.prune()
+            return self.instance
+        return self
+
+    def instantiate(self, module: Module) -> Type:
+        if self.instance:
+            return self.instance.instantiate(module)
+
+        raise Diagnostic(self.location, DiagnosticSeverity.Error, "Can not instantiate type variable")
+
+    def __str__(self):
+        if self.instance:
+            return str(self.instance)
+        return self.__name
+
+
+class InferenceConstructor(InferenceType):
+    def __init__(self, constructor: Type, arguments: Sequence[InferenceType], location: Location):
+        super(InferenceConstructor, self).__init__(location)
+
+        self.constructor = constructor
+        self.arguments = tuple(arguments)
+
+    def prune(self) -> InferenceType:
+        arguments = [arg.prune() for arg in self.arguments]
+        if self.arguments != arguments:
+            return InferenceConstructor(self.constructor, arguments, self.location)
+        return self
+
+    def instantiate(self, module: Module) -> Type:
+        if not self.arguments:
+            return self.constructor
+
+        arguments = [arg.instantiate(module) for arg in self.arguments]
+        return self.constructor.instantiate(module, arguments)
+
+    def __str__(self):
+        if self.arguments:
+            arguments = ', '.join(str(arg) for arg in self.arguments)
+            return f'{self.constructor.name}[{arguments}]'
+        return self.constructor.name
+
+
+class InferenceError(BootstrapError):
+    pass
+
+
+class InferenceContext:
+    def __init__(self):
+        self.__types = {}
+
+    def add_generic_parameter(self, param: GenericParameter) -> InferenceVariable:
+        self.__types[param] = InferenceVariable(param.name, param.location)
+        return self.__types[param]
+
+    def add_type(self, param_type: Type) -> InferenceType:
+        if param_type in self.__types:
+            return self.__types[param_type]
+
+        if param_type.generic_arguments:
+            arguments = [self.add_type(generic_argument) for generic_argument in param_type.generic_arguments]
+            constructor = InferenceConstructor(param_type.definition, arguments, param_type.location)
+        elif param_type.generic_parameters:
+            arguments = [self.add_type(generic_parameter) for generic_parameter in param_type.generic_arguments]
+            constructor = InferenceConstructor(param_type.definition, arguments, param_type.location)
+        else:
+            constructor = InferenceConstructor(param_type, [], param_type.location)
+
+        self.__types[param_type] = constructor
+        return constructor
+
+    @classmethod
+    def is_generic(cls, v: InferenceType, non_generic):
+        """Checks whether a given variable occurs in a list of non-generic variables
+
+        Note that a variables in such a list may be instantiated to a type term,
+        in which case the variables contained in the type term are considered
+        non-generic.
+
+        Note: Must be called with v pre-pruned
+
+        Args:
+            v: The TypeVariable to be tested for genericity
+            non_generic: A set of non-generic TypeVariables
+
+        Returns:
+            True if v is a generic variable, otherwise False
+        """
+        return not cls.occurs_in(v, non_generic)
+
+    @classmethod
+    def occurs_in_type(cls, v: InferenceType, type2: InferenceType):
+        """Checks whether a type variable occurs in a type expression.
+
+        Note: Must be called with v pre-pruned
+
+        Args:
+            v:  The TypeVariable to be tested for
+            type2: The type in which to search
+
+        Returns:
+            True if v occurs in type2, otherwise False
+        """
+        pruned_type2 = type2.prune()
+        if pruned_type2 == v:
+            return True
+        elif isinstance(pruned_type2, InferenceConstructor):
+            return cls.occurs_in(v, pruned_type2.arguments)
+        return False
+
+    @classmethod
+    def occurs_in(cls, t: InferenceType, types: Sequence[InferenceType]):
+        """Checks whether a types variable occurs in any other types.
+
+        Args:
+            t:  The TypeVariable to be tested for
+            types: The sequence of types in which to search
+
+        Returns:
+            True if t occurs in any of types, otherwise False
+        """
+        return any(cls.occurs_in_type(t, t2) for t2 in types)
+
+    @classmethod
+    def unify(cls, t1: InferenceType, t2: InferenceType):
+        """
+        Makes the types t1 and t2 the same.
+
+        :param t1:  The first type to be made equivalent
+        :param t2:  The second type to be be equivalent
+        :return: None
+        :raises InferenceError - Raised if the types cannot be unified.
+        """
+
+        t1 = t1.prune()
+        t2 = t2.prune()
+        if isinstance(t1, InferenceVariable):
+            if t1 != t2:
+                if cls.occurs_in_type(t1, t2):
+                    raise InferenceError("recursive unification")
+                t1.instance = t2
+        elif isinstance(t1, InferenceConstructor) and isinstance(t2, InferenceVariable):
+            cls.unify(t2, t1)
+        elif isinstance(t1, InferenceConstructor) and isinstance(t2, InferenceConstructor):
+            if t1.constructor != t2.constructor or len(t1.arguments) != len(t2.arguments):
+                raise InferenceError("Type mismatch: {0} != {1}".format(str(t1), str(t2)))
+            for p, q in zip(t1.arguments, t2.arguments):
+                cls.unify(p, q)
+        else:
+            assert 0, "Not unified"
 
 
 class Symbol(abc.ABC):
@@ -1476,6 +1883,48 @@ class ContainerSymbol(Symbol, abc.ABC):
         self.__scope.append(symbol)
 
 
+class GenericSymbol(NamedSymbol, abc.ABC):
+    @property
+    def is_generic(self) -> bool:
+        if self.generic_parameters:
+            return True
+        return any(arg.is_generic for arg in self.generic_arguments)
+
+    @property
+    @abc.abstractmethod
+    def definition(self) -> GenericSymbol:
+        raise NotImplementedError
+
+    @property
+    @abc.abstractmethod
+    def generic_parameters(self) -> Sequence[GenericParameter]:
+        raise NotImplementedError
+
+    @property
+    @abc.abstractmethod
+    def generic_arguments(self) -> Sequence[Type]:
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def instantiate(self, module: Module, generic_arguments: Sequence[Type], location: Location):
+        raise NotImplementedError
+
+    def __str__(self):
+        arguments = None
+        if self.generic_arguments:
+            arguments = ', '.join(str(arg) for arg in self.generic_arguments)
+        if self.generic_parameters:
+            arguments = ', '.join(str(arg) for arg in self.generic_parameters)
+
+        if arguments:
+            return f'{self.name}[{arguments}]'
+        return super(GenericSymbol, self).__str__()
+
+
+class GenericParameter(NamedSymbol, abc.ABC):
+    pass
+
+
 class Value(Symbol, abc.ABC):
     """ Abstract base for all values """
 
@@ -1512,15 +1961,19 @@ class Module(NamedSymbol, ContainerSymbol):
         return self.__location
 
 
-class Type(OwnedSymbol, ContainerSymbol, abc.ABC):
+class Type(GenericSymbol, OwnedSymbol, ContainerSymbol, abc.ABC):
     """ Abstract base for all types """
 
-    def __init__(self, owner: ContainerSymbol, name: str, location: Location):
+    def __init__(self, owner: ContainerSymbol, name: str, location: Location, *,
+                 generic_parameters=None, generic_arguments=None, definition=None):
         super(Type, self).__init__()
 
         self.__owner = owner
         self.__name = name
         self.__location = location
+        self.__generic_parameters = tuple(generic_parameters or [])
+        self.__generic_arguments = tuple(generic_arguments or [])
+        self.__definition = definition
 
     @property
     def owner(self) -> ContainerSymbol:
@@ -1529,6 +1982,18 @@ class Type(OwnedSymbol, ContainerSymbol, abc.ABC):
     @property
     def name(self) -> str:
         return self.__name
+
+    @property
+    def definition(self) -> Type:
+        return self.__definition
+
+    @property
+    def generic_parameters(self) -> Sequence[GenericParameter]:
+        return self.__generic_parameters
+
+    @property
+    def generic_arguments(self) -> Sequence[Type]:
+        return self.__generic_arguments
 
     @property
     def location(self) -> Location:
@@ -1542,6 +2007,9 @@ class Type(OwnedSymbol, ContainerSymbol, abc.ABC):
 
     def __ne__(self, other):
         return not (self == other)
+
+    def instantiate(self, module: Module, generic_arguments: Sequence[Type], location: Location):
+        raise Diagnostic(location, DiagnosticSeverity.Error, "Can not instantiate non generic type")
 
 
 class VoidType(Type):
@@ -1557,6 +2025,24 @@ class BooleanType(Type):
 class IntegerType(Type):
     def __init__(self, owner: ContainerSymbol, location: Location):
         super(IntegerType, self).__init__(owner, 'int', location)
+
+
+class ClassType(Type):
+    def instantiate(self, module: Module, generic_arguments: Sequence[Type], location: Location):
+        context = InstantiateContext(module)
+        context.aggregate(self.generic_parameters, generic_arguments)
+
+        return ClassType(
+            module, self.name, self.location, generic_arguments=generic_arguments, definition=self)
+
+
+class StructType(Type):
+    def instantiate(self, module: Module, generic_arguments: Sequence[Type], location: Location):
+        context = InstantiateContext(module)
+        context.aggregate(self.generic_parameters, generic_arguments)
+
+        return StructType(
+            module, self.name, self.location, generic_arguments=generic_arguments, definition=self)
 
 
 class FunctionType(Type):
@@ -1581,12 +2067,19 @@ class FunctionType(Type):
         return is_return_equal and all(
             param == other_param for param, other_param in zip(self.parameters, other.parameters))
 
+    def __hash__(self):
+        return id(self)
+
     def __str__(self):
         parameters = ', '.join(str(param_type) for param_type in self.parameters)
         return f"({parameters}) -> {self.return_type}"
 
 
-class Parameter(Value, OwnedSymbol):
+class GenericType(Type, GenericParameter):
+    pass
+
+
+class Parameter(OwnedSymbol, Value):
     def __init__(self, owner: Function, name: str, param_type: Type):
         super(Parameter, self).__init__(param_type, owner.location)
 
@@ -1609,8 +2102,9 @@ class Parameter(Value, OwnedSymbol):
         return f'{self.name}: {self.type}'
 
 
-class Function(Value, OwnedSymbol):
-    def __init__(self, owner: ContainerSymbol, name: str, func_type: FunctionType, location: Location):
+class Function(GenericSymbol, OwnedSymbol, Value):
+    def __init__(self, owner: ContainerSymbol, name: str, func_type: FunctionType, location: Location, *,
+                 generic_parameters=None, generic_arguments=None, definition=None):
         super(Function, self).__init__(func_type, location)
         self.__owner = owner
         self.__name = name
@@ -1618,6 +2112,9 @@ class Function(Value, OwnedSymbol):
             Parameter(self, f'arg{idx}', param_type) for idx, param_type in enumerate(func_type.parameters)
         ]
         self.__statement = None
+        self.__generic_parameters = tuple(generic_parameters or [])
+        self.__generic_arguments = tuple(generic_arguments or [])
+        self.__definition = definition
 
     @property
     def owner(self) -> ContainerSymbol:
@@ -1626,6 +2123,18 @@ class Function(Value, OwnedSymbol):
     @property
     def name(self) -> str:
         return self.__name
+
+    @property
+    def definition(self) -> Function:
+        return self.__definition
+
+    @property
+    def generic_parameters(self) -> Sequence[GenericParameter]:
+        return self.__generic_parameters
+
+    @property
+    def generic_arguments(self) -> Sequence[Type]:
+        return self.__generic_arguments
 
     @property
     def function_type(self) -> FunctionType:
@@ -1650,6 +2159,13 @@ class Function(Value, OwnedSymbol):
     def __str__(self):
         parameters = ', '.join(str(param) for param in self.parameters)
         return f'{self.name}({parameters}) -> {self.return_type}'
+
+    def instantiate(self, module: Module, generic_arguments: Sequence[Type], location: Location):
+        context = InstantiateContext(module)
+        context.aggregate(self.generic_parameters, generic_arguments)
+        function_type = context.instantiate(self.function_type, location)
+        return Function(
+            module, self.name, function_type, self.location, generic_arguments=generic_arguments, definition=self)
 
 
 class Overload(NamedSymbol):
@@ -1698,9 +2214,9 @@ class BooleanConstant(Value):
         return "True" if self.value else "False"
 
 
-class Call(Value):
+class CallInstruction(Value):
     def __init__(self, func: Function, arguments: Sequence[Value], location: Location):
-        super(Call, self).__init__(func.return_type, location)
+        super(CallInstruction, self).__init__(func.return_type, location)
 
         self.function = func
         self.arguments = arguments
@@ -1708,6 +2224,17 @@ class Call(Value):
     def __str__(self):
         arguments = ', '.join(str(arg) for arg in self.arguments)
         return f'{self.function.name}({arguments})'
+
+
+class NewInstruction(Value):
+    def __init__(self, return_type: Type, arguments: Sequence[Value], location: Location):
+        super(NewInstruction, self).__init__(return_type, location)
+
+        self.arguments = arguments
+
+    def __str__(self):
+        arguments = ', '.join(str(arg) for arg in self.arguments)
+        return f'{self.type}({arguments})'
 
 
 class Statement:
@@ -1793,11 +2320,15 @@ class ModuleCodegen:
         self.functions = MultiDict()
 
         # symbol to llvm
-        self.llvm_types = LazyDict(builder=self.declare_type)
+        self.llvm_types = LazyDict(builder=self.declare_type, initializer=self.initialize_type)
         self.llvm_functions = LazyDict(builder=self.declare_function)
 
     def __str__(self):
         return str(self.llvm_module)
+
+    @property
+    def llvm_context(self) -> ir.Context:
+        return self.llvm_module.context
 
     @multimethod
     def declare_type(self, type_symbol: Type):
@@ -1815,6 +2346,12 @@ class ModuleCodegen:
     def declare_type(self, _: IntegerType):
         return ir.IntType(64)
 
+    @multimethod
+    def declare_type(self, type_symbol: ClassType):
+        """ class = pointer to struct { fields... } """
+        llvm_struct = self.llvm_context.get_identified_type(str(type_symbol))
+        return llvm_struct.as_pointer()
+
     def declare_function(self, func: Function):
         llvm_return = self.llvm_types[func.return_type]
         llvm_params = [self.llvm_types[param.type] for param in func.parameters]
@@ -1827,9 +2364,22 @@ class ModuleCodegen:
 
         return llvm_func
 
+    @multimethod
+    def initialize_type(self, _: Type):
+        pass
+
+    @multimethod
+    def initialize_type(self, type_symbol: ClassType):
+        llvm_struct = self.llvm_context.get_identified_type(str(type_symbol))
+        try:
+            llvm_struct.set_body()
+        except:
+            pass
+
     def emit(self, model: SemanticModel):
         for func in model.functions:
-            self.emit_function(func)
+            if not func.is_generic:
+                self.emit_function(func)
 
     def emit_function(self, func: Function):
         llvm_func = self.llvm_functions[func]
@@ -2015,10 +2565,16 @@ class FunctionCodegen:
         return ir.Constant(llvm_type, value.value)
 
     @multimethod
-    def emit_value(self, value: Call):
+    def emit_value(self, value: CallInstruction):
         llvm_args = [self.emit_value(arg) for arg in value.arguments]
         llvm_func = self.llvm_functions[value.function]
         return self.llvm_builder.call(llvm_func, llvm_args)
+
+    @multimethod
+    def emit_value(self, value: NewInstruction):
+        llvm_type = self.llvm_types[value.type]
+        llvm_alloca = self.llvm_builder.alloca(llvm_type)
+        return self.llvm_builder.load(llvm_alloca)
 
 
 def load_source_content(location: Location, before=2, after=2):
@@ -2205,7 +2761,8 @@ def main():
     action = build
     if is_pdb:  # enable pdb if required
         action = process_pdb(action)
-    action = process_errors(action)
+    if not sys.gettrace():
+        action = process_errors(action)
     sys.exit(action(**kwargs) or 0)
 
 

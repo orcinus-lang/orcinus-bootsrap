@@ -70,7 +70,7 @@ def compile_and_execute(filename, *, name, opt_level, arguments, input=None):
     # orcinus - generate LLVM IR
     code, assembly, stderr = execute([PYTHON_EXECUTABLE, BOOTSTRAP_SCRIPT, filename], is_binary=True)
     if code:
-        return False, code, assembly, stderr.decode('utf-8').rstrip()
+        return False, -code, assembly, stderr.decode('utf-8').rstrip()
 
     # lli-6.0 - compile LLVM IR and execute
     flags = [

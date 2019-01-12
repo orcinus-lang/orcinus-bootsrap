@@ -892,7 +892,7 @@ class CallExpressionAST(ExpressionAST):
     arguments: Sequence[ExpressionAST]
 
 
-class LexicalScope(collections.abc.MutableMapping):
+class LexicalScope:
     def __init__(self, parent: LexicalScope = None):
         self.__parent = parent
         self.__defined = dict()  # Defined symbols
@@ -902,7 +902,7 @@ class LexicalScope(collections.abc.MutableMapping):
     def parent(self) -> LexicalScope:
         return self.__parent
 
-    def __getitem__(self, name: str) -> NamedSymbol:
+    def resolve(self, name: str) -> Optional[NamedSymbol]:
         """
         Resolve symbol by name in current scope.
 
@@ -921,16 +921,17 @@ class LexicalScope(collections.abc.MutableMapping):
         symbol = self.__defined.get(name)
         if symbol:
             if self.parent and isinstance(symbol, Overload):
-                parent_symbol = self.parent.get(name)
+                parent_symbol = self.parent.resolve(name)
                 if isinstance(parent_symbol, Overload):
                     symbol.extend(parent_symbol)
 
         # Resolve symbol in parent scope
         elif self.parent:
-            symbol = self.parent[name]
+            symbol = self.parent.resolve(name)
 
+        # Return None, if symbol is not found in current and ascendant scopes
         if not symbol:
-            raise KeyError(name)
+            return None
 
         # Clone overload
         if isinstance(symbol, Overload):
@@ -942,7 +943,8 @@ class LexicalScope(collections.abc.MutableMapping):
         self.__resolved[name] = symbol
         return symbol
 
-    def __setitem__(self, name: str, symbol: NamedSymbol) -> None:
+    def append(self, symbol: NamedSymbol, name: str = None) -> None:
+        name = name or symbol.name
         try:
             existed_symbol = self.__defined[name]
         except KeyError:
@@ -951,15 +953,6 @@ class LexicalScope(collections.abc.MutableMapping):
             if not isinstance(existed_symbol, Overload) or not isinstance(symbol, Function):
                 raise Diagnostic(symbol.location, DiagnosticSeverity.Error, f"Already defined symbol with name {name}")
             existed_symbol.append(symbol)
-
-    def __delitem__(self, name: str):
-        del self.__resolved[name]
-
-    def __len__(self) -> int:
-        return len(self.__resolved)
-
-    def __iter__(self) -> Iterator[NamedSymbol]:
-        return iter(self.__resolved)
 
 
 class SemanticContext:
@@ -1048,7 +1041,7 @@ class SemanticModel:
 
     def analyze(self):
         self.annotate_recursive_scope(self.tree)
-        self.declare_symbol(self.tree)
+        self.declare_symbol(self.tree, None)
         self.emit_functions(self.tree)
 
     def annotate_recursive_scope(self, node: NodeAST, parent=None):
@@ -1069,7 +1062,11 @@ class SemanticModel:
     def annotate_scope(self, _: FunctionAST, parent: LexicalScope) -> LexicalScope:
         return LexicalScope(parent)
 
-    def declare_symbol(self, node: NodeAST, parent: ContainerSymbol = None):
+    @multimethod
+    def annotate_scope(self, _: BlockStatementAST, parent: LexicalScope) -> LexicalScope:
+        return LexicalScope(parent)
+
+    def declare_symbol(self, node: NodeAST, scope: LexicalScope = None, parent: ContainerSymbol = None):
         symbol = self.annotate_symbol(node, parent)
         self.symbols[node] = symbol
 
@@ -1079,16 +1076,17 @@ class SemanticModel:
         elif isinstance(symbol, Function):
             self.functions.append(symbol)
 
-        # Declare symbol in current scope
-        if isinstance(symbol, NamedSymbol):
-            scope = self.scopes[node]
-            scope[symbol.name] = symbol
+        # Declare symbol in parent scope
+        if scope is not None and isinstance(symbol, NamedSymbol):
+            scope.append(symbol)
 
         # Add members
         if hasattr(node, 'members'):
+            child_scope = self.scopes[node]
             for child in node.members:
-                child_symbol = self.declare_symbol(child, symbol)
-                symbol.add_member(child_symbol)
+                child_symbol = self.declare_symbol(child, child_scope, symbol)
+                if child_symbol:
+                    symbol.add_member(child_symbol)
 
         return symbol
 
@@ -1129,7 +1127,7 @@ class SemanticModel:
             func_param.location = node_param.location
 
             self.symbols[node_param] = func_param
-            scope[node_param.name] = func_param
+            scope.append(func_param)
 
         return func
 
@@ -1196,14 +1194,12 @@ class SemanticModel:
             return BooleanConstant(BooleanType(self.module, node.location), node.name == 'True', node.location)
 
         scope = self.scopes[node]
-        try:
-            symbol = scope[node.name]
-        except KeyError:
+        symbol = scope.resolve(node.name)
+        if not symbol:
             raise Diagnostic(
                 node.location, DiagnosticSeverity.Error, f"Not found symbol `{node.name} in current scope`")
-        else:
-            if isinstance(symbol, Parameter):
-                return symbol
+        elif isinstance(symbol, Parameter):
+            return symbol
 
         raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented value emitting")
 
@@ -1215,8 +1211,8 @@ class SemanticModel:
                 node.location, DiagnosticSeverity.Error, 'Not implemented object call')
 
         name = node.value.name
-        scope = self.scopes[node]
-        symbol = scope.get(name)
+        scope: LexicalScope = self.scopes[node]
+        symbol = scope.resolve(name)
         if not symbol:
             raise Diagnostic(
                 node.location, DiagnosticSeverity.Error, f'Not found function `{name}` in current scope')

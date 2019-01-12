@@ -45,8 +45,10 @@ class cached_property(object):
         self.func = func
 
     def __get__(self, instance, cls=None):
-        result = instance.__dict__[self.func.__name__] = self.func(instance)
-        return result
+        if instance:
+            result = instance.__dict__[self.func.__name__] = self.func(instance)
+            return result
+        return None  # ABC
 
 
 class BootstrapError(Exception):
@@ -1156,7 +1158,6 @@ class SemanticContext:
             ]
         self.paths = paths
         self.modules = {}
-        self.filenames = {}
 
     @staticmethod
     def convert_module_name(filename, path):
@@ -1176,12 +1177,8 @@ class SemanticContext:
         return os.path.join(path, filename)
 
     @cached_property
-    def builtins_model(self) -> SemanticModel:
-        return self.load('__builtins__')
-
-    @cached_property
     def builtins_module(self) -> Module:
-        return self.builtins_model.module
+        return self.load('__builtins__')
 
     @cached_property
     def boolean_type(self) -> BooleanType:
@@ -1203,14 +1200,14 @@ class SemanticContext:
 
         raise BootstrapError(f"Not found file `{filename}` in library paths")
 
-    def open(self, filename) -> SemanticModel:
+    def open(self, filename) -> Module:
         """ Open module from file """
         module_name = self.get_module_name(filename)
 
         with open(filename, 'r', encoding='utf8') as stream:
             return self.__open_source(filename, module_name, stream)
 
-    def load(self, module_name) -> SemanticModel:
+    def load(self, module_name) -> Module:
         for path in self.paths:
             filename = self.convert_filename(module_name, path)
             try:
@@ -1222,19 +1219,19 @@ class SemanticContext:
 
         raise BootstrapError(f'Not found module {module_name}')
 
-    def __open_source(self, filename, module_name, stream):
+    def __open_source(self, filename, module_name, stream) -> Module:
         logger.info(f"Open `{module_name}` from file `{filename}`")
 
         if module_name in self.modules:
-            return self.modules[module_name]
+            model = self.modules[module_name]
+        else:
+            parser = Parser(filename, stream)
+            tree = parser.parse()
 
-        parser = Parser(filename, stream)
-        tree = parser.parse()
-
-        model = SemanticModel(self, module_name, tree)
-        self.modules[module_name] = self.filenames[filename] = model
-        model.analyze()
-        return model
+            model = SemanticModel(self, module_name, tree)
+            self.modules[module_name] = model
+            model.analyze()
+        return model.module
 
 
 class SemanticModel:
@@ -1244,8 +1241,6 @@ class SemanticModel:
         self.tree = tree
         self.symbols = {}
         self.scopes = {}
-        self.types = []
-        self.functions = []
 
     @property
     def module(self) -> Module:
@@ -1281,12 +1276,6 @@ class SemanticModel:
     def declare_symbol(self, node: NodeAST, scope: LexicalScope = None, parent: ContainerSymbol = None):
         symbol = self.annotate_symbol(node, parent)
         self.symbols[node] = symbol
-
-        # Collect types and functions from model
-        if isinstance(symbol, Type):
-            self.types.append(symbol)
-        elif isinstance(symbol, Function):
-            self.functions.append(symbol)
 
         # Declare symbol in parent scope
         if scope is not None and isinstance(symbol, NamedSymbol):
@@ -1604,8 +1593,12 @@ class InstantiateContext:
 
     def aggregate(self, generic_parameters, generic_arguments):
         for param, arg in zip(generic_parameters, generic_arguments):
-            self.__mapping[param] = arg
+            self.register(param, arg)
 
+    def register(self, param, arg):
+        self.__mapping[param] = arg
+
+    @multimethod
     def instantiate(self, generic: Type, location: Location):
         if generic in self.__mapping:
             return self.__mapping[generic]
@@ -1625,8 +1618,42 @@ class InstantiateContext:
         else:
             result_type = generic
 
-        self.__mapping[generic] = result_type
+        self.register(generic, result_type)
         return result_type
+
+    @multimethod
+    def instantiate(self, statement: Statement, location: Location):
+        raise Diagnostic(statement.location, DiagnosticSeverity.Error, "Not implemented statement instantiation")
+
+    @multimethod
+    def instantiate(self, statement: BlockStatement, location: Location):
+        return BlockStatement(
+            [self.instantiate(child, location) for child in statement.statements],
+            statement.location
+        )
+
+    @multimethod
+    def instantiate(self, statement: ReturnStatement, location: Location):
+        return ReturnStatement(
+            self.instantiate(statement.value, location) if statement.value else None,
+            statement.location
+        )
+
+    @multimethod
+    def instantiate(self, value: Value, location: Location):
+        raise Diagnostic(value.location, DiagnosticSeverity.Error, "Not implemented value instantiation")
+
+    @multimethod
+    def instantiate(self, value: IntegerConstant, location: Location):
+        return value
+
+    @multimethod
+    def instantiate(self, value: BooleanConstant, location: Location):
+        return value
+
+    @multimethod
+    def instantiate(self, value: Parameter, location: Location):
+        return self.__mapping[value]
 
 
 class InferenceType(abc.ABC):
@@ -1819,6 +1846,92 @@ class InferenceContext:
             assert 0, "Not unified"
 
 
+class MangledContext:
+    def __init__(self):
+        self.parts = []
+
+    @multimethod
+    def append(self, name: str):
+        self.parts.append(name)
+        self.append(len(name))
+
+    @multimethod
+    def append(self, value: int):
+        self.parts.append(str(value))
+
+    @multimethod
+    def append(self, module: Module):
+        self.append(module.name)
+        self.append("M")
+
+    def append_generic(self, generics):
+        for generic in reversed(generics):
+            self.append(generic)
+        self.append(len(generics))
+        self.append("G")
+
+    def construct(self):
+        return ''.join(reversed(self.parts))
+
+    @multimethod
+    def append(self, type: Type):
+        self.parts.append(str(type))
+
+    @multimethod
+    def mangle(self, symbol: MangledSymbol):
+        raise Diagnostic(symbol.location, DiagnosticSeverity.Error, "Can not mangle symbol name")
+
+    @multimethod
+    def mangle(self, func: Function):
+        definition = func.definition if func.definition else func
+
+        self.append(func.return_type)
+        self.parts.append("R")
+        for param in reversed(func.parameters):
+            self.append(param.type)
+            self.parts.append("P")
+        self.append(len(func.parameters))
+        self.append('A')
+
+        if func.generic_arguments:
+            self.append_generic(func.generic_arguments)
+        elif definition.generic_parameters:
+            self.append_generic(definition.generic_parameters)
+        self.append(func.name)
+
+        self.append('::')
+        self.append(definition.owner)
+        self.append('ORX_FUNC_')
+
+        return self.construct()
+
+    @multimethod
+    def mangle(self, symbol: IntegerType):
+        return "i32"
+
+    @multimethod
+    def mangle(self, symbol: BooleanType):
+        return "b"
+
+    @multimethod
+    def mangle(self, symbol: VoidType):
+        return "v"
+
+    @multimethod
+    def mangle(self, type_symbol: Type):
+        definition = type_symbol.definition if type_symbol.definition else type_symbol
+
+        if type_symbol.generic_arguments:
+            self.append_generic(type_symbol.generic_arguments)
+        elif definition.generic_parameters:
+            self.append_generic(definition.generic_parameters)
+        self.append(type_symbol.name)
+
+        self.append('::')
+        self.append(definition.owner)
+        self.append('ORX_TYPE_')
+
+
 class Symbol(abc.ABC):
     """ Abstract base for all symbols """
 
@@ -1861,6 +1974,13 @@ class OwnedSymbol(NamedSymbol, abc.ABC):
         if isinstance(self.owner, Module):
             return cast(Module, self.owner)
         return cast(OwnedSymbol, self.owner).module
+
+
+class MangledSymbol(OwnedSymbol, abc.ABC):
+    @property
+    @abc.abstractmethod
+    def mangled_name(self) -> str:
+        raise NotImplementedError
 
 
 class ContainerSymbol(Symbol, abc.ABC):
@@ -1951,6 +2071,9 @@ class Module(NamedSymbol, ContainerSymbol):
 
         self.__name = name
         self.__location = location
+        self.__instances = {}  # Map of all generic instances
+        self.__functions = []
+        self.__types = []
 
     @property
     def name(self) -> str:
@@ -1960,8 +2083,23 @@ class Module(NamedSymbol, ContainerSymbol):
     def location(self) -> Location:
         return self.__location
 
+    @property
+    def functions(self) -> Sequence[Function]:
+        return self.__functions
 
-class Type(GenericSymbol, OwnedSymbol, ContainerSymbol, abc.ABC):
+    def add_function(self, func: Function):
+        self.__functions.append(func)
+
+    def find_instance(self, generic: GenericSymbol, generic_arguments):
+        key = (generic, tuple(generic_arguments))
+        return self.__instances.get(key)
+
+    def register_instance(self, generic: GenericSymbol, generic_arguments, instance: GenericSymbol):
+        key = (generic, tuple(generic_arguments))
+        self.__instances[key] = instance
+
+
+class Type(MangledSymbol, GenericSymbol, OwnedSymbol, ContainerSymbol, abc.ABC):
     """ Abstract base for all types """
 
     def __init__(self, owner: ContainerSymbol, name: str, location: Location, *,
@@ -1982,6 +2120,11 @@ class Type(GenericSymbol, OwnedSymbol, ContainerSymbol, abc.ABC):
     @property
     def name(self) -> str:
         return self.__name
+
+    @cached_property
+    def mangled_name(self) -> str:
+        context = MangledContext()
+        return context.mangle(self)
 
     @property
     def definition(self) -> Type:
@@ -2029,20 +2172,24 @@ class IntegerType(Type):
 
 class ClassType(Type):
     def instantiate(self, module: Module, generic_arguments: Sequence[Type], location: Location):
-        context = InstantiateContext(module)
-        context.aggregate(self.generic_parameters, generic_arguments)
-
-        return ClassType(
-            module, self.name, self.location, generic_arguments=generic_arguments, definition=self)
+        instance = module.find_instance(self.definition or self, generic_arguments)
+        if not instance:
+            context = InstantiateContext(module)
+            context.aggregate(self.generic_parameters, generic_arguments)
+            instance = ClassType(module, self.name, self.location, generic_arguments=generic_arguments, definition=self)
+        module.register_instance(self.definition or self, generic_arguments, instance)
+        return instance
 
 
 class StructType(Type):
     def instantiate(self, module: Module, generic_arguments: Sequence[Type], location: Location):
-        context = InstantiateContext(module)
-        context.aggregate(self.generic_parameters, generic_arguments)
-
-        return StructType(
-            module, self.name, self.location, generic_arguments=generic_arguments, definition=self)
+        instance = module.find_instance(self.definition or self, generic_arguments)
+        if not instance:
+            context = InstantiateContext(module)
+            context.aggregate(self.generic_parameters, generic_arguments)
+            return StructType(module, self.name, self.location, generic_arguments=generic_arguments, definition=self)
+        module.register_instance(self.definition or self, generic_arguments, instance)
+        return instance
 
 
 class FunctionType(Type):
@@ -2102,7 +2249,7 @@ class Parameter(OwnedSymbol, Value):
         return f'{self.name}: {self.type}'
 
 
-class Function(GenericSymbol, OwnedSymbol, Value):
+class Function(MangledSymbol, GenericSymbol, OwnedSymbol, Value):
     def __init__(self, owner: ContainerSymbol, name: str, func_type: FunctionType, location: Location, *,
                  generic_parameters=None, generic_arguments=None, definition=None):
         super(Function, self).__init__(func_type, location)
@@ -2116,6 +2263,8 @@ class Function(GenericSymbol, OwnedSymbol, Value):
         self.__generic_arguments = tuple(generic_arguments or [])
         self.__definition = definition
 
+        self.module.add_function(self)
+
     @property
     def owner(self) -> ContainerSymbol:
         return self.__owner
@@ -2123,6 +2272,11 @@ class Function(GenericSymbol, OwnedSymbol, Value):
     @property
     def name(self) -> str:
         return self.__name
+
+    @cached_property
+    def mangled_name(self) -> str:
+        context = MangledContext()
+        return context.mangle(self)
 
     @property
     def definition(self) -> Function:
@@ -2161,11 +2315,20 @@ class Function(GenericSymbol, OwnedSymbol, Value):
         return f'{self.name}({parameters}) -> {self.return_type}'
 
     def instantiate(self, module: Module, generic_arguments: Sequence[Type], location: Location):
-        context = InstantiateContext(module)
-        context.aggregate(self.generic_parameters, generic_arguments)
-        function_type = context.instantiate(self.function_type, location)
-        return Function(
-            module, self.name, function_type, self.location, generic_arguments=generic_arguments, definition=self)
+        instance = module.find_instance(self.definition or self, generic_arguments)
+        if not instance:
+            context = InstantiateContext(module)
+            context.aggregate(self.generic_parameters, generic_arguments)
+            function_type = context.instantiate(self.function_type, location)
+            instance = Function(
+                module, self.name, function_type, self.location, generic_arguments=generic_arguments, definition=self)
+            context.register(self, instance)
+            for original_param, instance_param in zip(self.parameters, instance.parameters):
+                context.register(original_param, instance_param)
+            instance.statement = context.instantiate(self.statement, location)
+
+        module.register_instance(self.definition or self, generic_arguments, instance)
+        return instance
 
 
 class Overload(NamedSymbol):
@@ -2349,14 +2512,14 @@ class ModuleCodegen:
     @multimethod
     def declare_type(self, type_symbol: ClassType):
         """ class = pointer to struct { fields... } """
-        llvm_struct = self.llvm_context.get_identified_type(str(type_symbol))
+        llvm_struct = self.llvm_context.get_identified_type(type_symbol.mangled_name)
         return llvm_struct.as_pointer()
 
     def declare_function(self, func: Function):
         llvm_return = self.llvm_types[func.return_type]
         llvm_params = [self.llvm_types[param.type] for param in func.parameters]
         llvm_type = ir.FunctionType(llvm_return, llvm_params)
-        llvm_func = ir.Function(self.llvm_module, llvm_type, f'ORX_{func.name}')
+        llvm_func = ir.Function(self.llvm_module, llvm_type, func.mangled_name)
         llvm_func.linkage = 'internal'
 
         for llvm_arg, param in zip(llvm_func.args, func.parameters):
@@ -2370,14 +2533,14 @@ class ModuleCodegen:
 
     @multimethod
     def initialize_type(self, type_symbol: ClassType):
-        llvm_struct = self.llvm_context.get_identified_type(str(type_symbol))
+        llvm_struct = self.llvm_context.get_identified_type(type_symbol.mangled_name)
         try:
             llvm_struct.set_body()
         except:
             pass
 
-    def emit(self, model: SemanticModel):
-        for func in model.functions:
+    def emit(self, module: Module):
+        for func in module.functions:
             if not func.is_generic:
                 self.emit_function(func)
 
@@ -2670,10 +2833,9 @@ def build(filenames: Sequence[str]):
     # initialize semantic context
     context = SemanticContext()
     for filename in filenames:
-        model = context.open(filename)
-
-        generator = ModuleCodegen(model.module.name)
-        generator.emit(model)
+        module = context.open(filename)
+        generator = ModuleCodegen(module.name)
+        generator.emit(module)
         print(generator)
 
 

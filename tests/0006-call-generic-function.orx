@@ -1,0 +1,9 @@
+# EXIT: 2
+
+def identity[T](value: T) -> T:
+    return value
+
+def main() -> int:
+    if identity(True):
+        return identity(2)
+    return identity(0)

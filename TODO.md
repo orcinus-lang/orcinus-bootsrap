@@ -12,10 +12,28 @@ Minimum viable product (MVP)
         - [ ] `continue`
         - [ ] `while` ... `else` ...
     - [ ] Function call
-        - [ ] Return value from function
+        - [x] Return value from function
+        - [ ] Return void value from function, e.g. function without return
         - [ ] Uniform function call syntax
         - [ ] Uniform property and field access syntax using functions
-        - [ ] Uniform operators calls (e.g. `a + b` is syntax sugar for `__add__(a, b)`)
+        - [ ] Uniform operators calls, e.g. `a + b` is syntax sugar for `__add__(a, b)`
+        - [ ] Function overload (required type checking)
+    - [ ] Type checks:
+        - [ ] Check function parameters and arguments 
+        - [ ] Check function return type and type of `return` statement
+        - [ ] Interface type inference
+    - [ ] Function statements:
+        - [ ] Parameters using.
+        - [ ] Mutable and not mutable variables.
+        - [ ] Variables visibility.
+        - [x] Function call 
+    - [ ] Types:
+        - [ ] Constants of integer type: e.g. `1`, `2`, `-3`
+        - [ ] Constants of boolean type: `True` and `False`
+        - [ ] Constant of void type: `None`
+        - [ ] Struct types
+        - [ ] Class types
+        - [ ] Interface types
 - [ ] Standard library:        
     - [ ] Integer type:
         - [ ] Unary operators

@@ -420,7 +420,7 @@ class Scanner:
 
 
 class Parser:
-    MEMBERS_STARTS = (TokenID.Pass, TokenID.Def, TokenID.Class, TokenID.Struct)
+    MEMBERS_STARTS = (TokenID.Pass, TokenID.Def, TokenID.Class, TokenID.Struct, TokenID.Name)
     EXPRESSION_STARTS = (TokenID.Number, TokenID.Name, TokenID.LeftParenthesis)
     STATEMENT_STARTS = (TokenID.Pass, TokenID.Return, TokenID.While, TokenID.If) + EXPRESSION_STARTS
 
@@ -568,6 +568,10 @@ class Parser:
         """
         member:
             function
+            class
+            struct
+            pass_member
+            named_member
         """
         if self.match(TokenID.Def):
             return self.parse_function()
@@ -577,6 +581,8 @@ class Parser:
             return self.parse_struct()
         elif self.match(TokenID.Pass):
             return self.parse_pass_member()
+        elif self.match(TokenID.Name):
+            return self.parse_named_member()
 
         self.match(*self.MEMBERS_STARTS)
 
@@ -641,6 +647,19 @@ class Parser:
 
         # noinspection PyArgumentList
         return PassMemberAST(location=tok_pass.location)
+
+    def parse_named_member(self) -> FieldAST:
+        """
+        named_member:
+            Name ':' type
+        """
+        tok_name = self.consume(TokenID.Name)
+        self.consume(TokenID.Colon)
+        field_type = self.parse_type()
+        self.consume(TokenID.NewLine)
+
+        # noinspection PyArgumentList
+        return FieldAST(name=tok_name.value, type=field_type, location=tok_name.location)
 
     def parse_function(self) -> FunctionAST:
         """
@@ -833,13 +852,13 @@ class Parser:
         expression = self.parse_expression()
         statement = None
 
-        # noinspection PyArgumentList
         if self.match(TokenID.Equals):
             statement = self.parse_assign_statement(expression)
 
         self.consume(TokenID.NewLine)
         if not statement:
-            statement = ExpressionStatementAST(value=value, location=value.location)
+            # noinspection PyArgumentList
+            statement = ExpressionStatementAST(value=expression, location=expression.location)
         return statement
 
     def parse_assign_statement(self, target: ExpressionAST):
@@ -891,6 +910,7 @@ class Parser:
              call_expression
              parenthesis_expression
              subscribe_expression
+             attribute_expression
         """
         if self.match(TokenID.Number):
             expression = self.parse_number_expression()
@@ -899,14 +919,15 @@ class Parser:
         elif self.match(TokenID.LeftParenthesis):
             expression = self.parse_parenthesis_expression()
         else:
-            self.match(*self.EXPRESSION_STARTS)
-            raise NotImplementedError  # Make linter happy
+            raise self.match(*self.EXPRESSION_STARTS)  # Make linter happy
 
-        while self.match(TokenID.LeftParenthesis, TokenID.LeftSquare):
+        while self.match(TokenID.LeftParenthesis, TokenID.LeftSquare, TokenID.Dot):
             if self.match(TokenID.LeftParenthesis):
                 expression = self.parse_call_expression(expression)
             elif self.match(TokenID.LeftSquare):
                 expression = self.parse_subscribe_expression(expression)
+            elif self.match(TokenID.Dot):
+                expression = self.parse_attribute_expression(expression)
         return expression
 
     def parse_number_expression(self) -> ExpressionAST:
@@ -932,7 +953,7 @@ class Parser:
     def parse_call_expression(self, value: ExpressionAST) -> ExpressionAST:
         """
         call_expression
-            expression '(' arguments ')'
+            atom '(' arguments ')'
         """
         self.consume(TokenID.LeftParenthesis)
         arguments = self.parse_arguments()
@@ -945,7 +966,7 @@ class Parser:
     def parse_subscribe_expression(self, value: ExpressionAST) -> ExpressionAST:
         """
         subscribe_expression
-            expression '[' arguments ']'
+            atom '[' arguments ']'
         """
         self.consume(TokenID.LeftSquare)
         arguments = self.parse_arguments()
@@ -954,6 +975,18 @@ class Parser:
 
         # noinspection PyArgumentList
         return SubscribeExpressionAST(value=value, arguments=arguments, location=location)
+
+    def parse_attribute_expression(self, value: ExpressionAST) -> ExpressionAST:
+        """
+        attribute_expression:
+            atom '.' Name
+        """
+        self.consume(TokenID.Dot)
+        tok_name = self.consume(TokenID.Name)
+        location = value.location + tok_name.location
+
+        # noinspection PyArgumentList
+        return AttributeAST(value=value, name=tok_name.value, location=location)
 
     def parse_parenthesis_expression(self) -> ExpressionAST:
         """
@@ -1033,6 +1066,12 @@ class ClassAST(MemberAST):
     name: str
     members: Sequence[MemberAST]
     generic_parameters: Sequence[GenericParameterAST]
+
+
+@dataclass(unsafe_hash=True, frozen=True)
+class FieldAST(MemberAST):
+    name: str
+    type: TypeAST
 
 
 @dataclass(unsafe_hash=True, frozen=True)
@@ -1120,6 +1159,12 @@ class CallExpressionAST(ExpressionAST):
 class SubscribeExpressionAST(ExpressionAST):
     value: ExpressionAST
     arguments: Sequence[ExpressionAST]
+
+
+@dataclass(unsafe_hash=True, frozen=True)
+class AttributeAST(ExpressionAST):
+    value: ExpressionAST
+    name: str
 
 
 class LexicalScope:
@@ -1321,8 +1366,19 @@ class SemanticModel:
     def annotate_scope(self, _: BlockStatementAST, parent: LexicalScope) -> LexicalScope:
         return LexicalScope(parent)
 
+    @multimethod
+    def annotate_scope(self, _: ClassAST, parent: LexicalScope) -> LexicalScope:
+        return LexicalScope(parent)
+
+    @multimethod
+    def annotate_scope(self, _: StructAST, parent: LexicalScope) -> LexicalScope:
+        return LexicalScope(parent)
+
     def declare_symbol(self, node: NodeAST, scope: LexicalScope = None, parent: ContainerSymbol = None):
         symbol = self.annotate_symbol(node, parent)
+        if not symbol:
+            return None
+
         self.symbols[node] = symbol
 
         # Declare symbol in parent scope
@@ -1384,6 +1440,10 @@ class SemanticModel:
         return Module(self.module_name, Location(node.location.filename))
 
     @multimethod
+    def annotate_symbol(self, node: PassMemberAST, parent: ContainerSymbol) -> Optional[Symbol]:
+        return None
+
+    @multimethod
     def annotate_symbol(self, node: FunctionAST, parent: ContainerSymbol) -> Function:
         scope = self.scopes[node]
         generic_parameters = self.annotate_generics(scope, node.generic_parameters)
@@ -1422,6 +1482,14 @@ class SemanticModel:
     @multimethod
     def annotate_symbol(self, node: GenericParameterAST, parent: ContainerSymbol) -> Symbol:
         return GenericType(node.name, node.location)
+
+    @multimethod
+    def annotate_symbol(self, node: FieldAST, parent: ContainerSymbol) -> Field:
+        if not isinstance(parent, Type):
+            raise Diagnostic(node.location, DiagnosticSeverity.Error, "Field member must be declared in type")
+
+        field_type = self.resolve_type(node.type)
+        return Field(cast(Type, parent), node.name, field_type, node.location)
 
     def emit_functions(self, module: ModuleAST):
         for member in module.members:
@@ -1597,6 +1665,23 @@ class SemanticModel:
             scope: LexicalScope = self.scopes[node]
             scope.append(symbol)
 
+        if symbol.type != value.type:
+            message = f"Can not cast  from type ‘{value.type}’ type, got ‘{symbol.type}’"
+            raise Diagnostic(node.location, DiagnosticSeverity.Error, message)
+
+        return AssignStatement(symbol, value, node.location)
+
+    @multimethod
+    def emit_assignment(self, node: AttributeAST, value: Value, location: Location) -> Statement:
+        symbol = self.emit_symbol(node, True)
+        if not isinstance(symbol, TargetValue):
+            message = f"Can not assign value to target"
+            raise Diagnostic(node.location, DiagnosticSeverity.Error, message)
+
+        if symbol.type != value.type:
+            message = f"Can not cast  from type ‘{value.type}’ type, got ‘{symbol.type}’"
+            raise Diagnostic(node.location, DiagnosticSeverity.Error, message)
+
         return AssignStatement(symbol, value, node.location)
 
     @multimethod
@@ -1605,10 +1690,18 @@ class SemanticModel:
 
     @multimethod
     def emit_value(self, node: IntegerExpressionAST) -> Value:
-        return self.emit_symbol(node, True)
+        return cast(Value, self.emit_symbol(node, True))
 
     @multimethod
     def emit_value(self, node: NamedExpressionAST) -> Value:
+        value = self.emit_symbol(node, True)
+        if isinstance(value, Value):
+            return value
+
+        raise Diagnostic(node.location, DiagnosticSeverity.Error, "Required value, but got another object")
+
+    @multimethod
+    def emit_value(self, node: AttributeAST) -> Value:
         value = self.emit_symbol(node, True)
         if isinstance(value, Value):
             return value
@@ -1657,6 +1750,23 @@ class SemanticModel:
             raise Diagnostic(
                 node.location, DiagnosticSeverity.Error, f"Not found symbol `{node.name} in current scope`")
         return symbol
+
+    @multimethod
+    def emit_symbol(self, node: AttributeAST, is_exists: bool) -> Symbol:
+        instance = self.emit_symbol(node.value, True)
+        if isinstance(instance, Value):
+            value_type = instance.type
+            symbol = value_type.scope.resolve(node.name)
+
+            if isinstance(symbol, Field):
+                return BoundedField(instance, symbol, node.location)
+            # elif isinstance(symbol, Overload):
+            #     return BoundedOverload(instance, symbol)
+            elif is_exists and not symbol:
+                raise Diagnostic(
+                    node.location, DiagnosticSeverity.Error, f"Not found symbol `{node.name}` in type {value_type}`")
+
+        raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented symbol emitting")
 
     @multimethod
     def emit_symbol(self, node: SubscribeExpressionAST, is_exists: bool) -> Symbol:
@@ -1981,6 +2091,8 @@ class MangledContext:
         elif definition.generic_parameters:
             self.append_generic(definition.generic_parameters)
         self.append(func.name)
+        self.append(len(func.name))
+        self.append("F")
 
         self.append('::')
         self.append(definition.owner)
@@ -2009,10 +2121,14 @@ class MangledContext:
         elif definition.generic_parameters:
             self.append_generic(definition.generic_parameters)
         self.append(type_symbol.name)
+        self.append(len(type_symbol.name))
+        self.append("T")
 
         self.append('::')
         self.append(definition.owner)
         self.append('ORX_TYPE_')
+
+        return self.construct()
 
 
 class Symbol(abc.ABC):
@@ -2225,6 +2341,10 @@ class Type(MangledSymbol, GenericSymbol, OwnedSymbol, ContainerSymbol, abc.ABC):
     def location(self) -> Location:
         return self.__location
 
+    @property
+    def is_pointer(self) -> True:
+        return False
+
     def __hash__(self):
         return id(self)
 
@@ -2254,6 +2374,14 @@ class IntegerType(Type):
 
 
 class ClassType(Type):
+    @property
+    def is_pointer(self) -> bool:
+        return True
+
+    @property
+    def fields(self) -> Sequence[Field]:
+        return tuple(field for field in self.members if isinstance(field, Field))
+
     def instantiate(self, module: Module, generic_arguments: Sequence[Type], location: Location):
         instance = module.find_instance(self.definition or self, generic_arguments)
         if not instance:
@@ -2475,6 +2603,30 @@ class Overload(NamedSymbol):
             self.append(function)
 
 
+class Field(OwnedSymbol):
+    def __init__(self, owner: Type, name: str, field_type: Type, location: Location):
+        self.__owner = owner
+        self.__name = name
+        self.__type = field_type
+        self.__location = location
+
+    @property
+    def owner(self) -> Type:
+        return self.__owner
+
+    @property
+    def name(self) -> str:
+        return self.__name
+
+    @property
+    def type(self) -> Type:
+        return self.__type
+
+    @property
+    def location(self) -> Location:
+        return self.__location
+
+
 class IntegerConstant(Value):
     def __init__(self, value_type: IntegerType, value: int, location: Location):
         super(IntegerConstant, self).__init__(value_type, location)
@@ -2516,6 +2668,23 @@ class NewInstruction(Value):
     def __str__(self):
         arguments = ', '.join(str(arg) for arg in self.arguments)
         return f'{self.type}({arguments})'
+
+
+class BoundedValue(Value, abc.ABC):
+    def __init__(self, instance: Value, value_type: Type, location: Location):
+        super(BoundedValue, self).__init__(value_type, location)
+
+        self.instance = instance
+
+
+class BoundedField(BoundedValue, TargetValue):
+    def __init__(self, instance: Value, field: Field, location: Location):
+        super(BoundedField, self).__init__(instance, field.type, location)
+
+        self.field = field
+
+    def __str__(self):
+        return f'{self.instance}.{self.field.name}'
 
 
 class Statement:
@@ -2619,6 +2788,23 @@ class ModuleCodegen:
     def llvm_context(self) -> ir.Context:
         return self.llvm_module.context
 
+    @cached_property
+    def llvm_size(self) -> ir.IntType:
+        return ir.IntType(32)
+
+    @cached_property
+    def llvm_void(self) -> ir.VoidType:
+        return ir.VoidType()
+
+    @cached_property
+    def llvm_opaque(self):
+        return ir.IntType(8).as_pointer()
+
+    @cached_property
+    def llvm_malloc(self):
+        llvm_type = ir.FunctionType(self.llvm_opaque, [self.llvm_size])
+        return ir.Function(self.llvm_module, llvm_type, 'malloc')
+
     @multimethod
     def declare_type(self, type_symbol: Type):
         raise Diagnostic(type_symbol.location, DiagnosticSeverity.Error, "Not implemented type conversion to LLVM")
@@ -2660,10 +2846,8 @@ class ModuleCodegen:
     @multimethod
     def initialize_type(self, type_symbol: ClassType):
         llvm_struct = self.llvm_context.get_identified_type(type_symbol.mangled_name)
-        try:
-            llvm_struct.set_body()
-        except:
-            pass
+        llvm_fields = (self.llvm_types[field.type] for field in type_symbol.fields)
+        llvm_struct.set_body(*llvm_fields)
 
     def emit(self, module: Module):
         for func in module.functions:
@@ -2742,6 +2926,12 @@ class FunctionCodegen:
     @property
     def llvm_functions(self) -> Mapping[Function, ir.Function]:
         return self.parent.llvm_functions
+
+    def emit_sizeof(self, type: Type):
+        llvm_type = self.parent.llvm_types[type]
+        llvm_pointer = llvm_type.as_pointer() if not type.is_pointer else llvm_type
+        llvm_size = self.llvm_builder.gep(ir.Constant(llvm_pointer, None), [ir.Constant(ir.IntType(32), 0)])
+        return self.llvm_builder.ptrtoint(llvm_size, self.parent.llvm_size)
 
     @multimethod
     def emit_statement(self, statement: Statement) -> bool:
@@ -2868,6 +3058,11 @@ class FunctionCodegen:
         return self.llvm_builder.load(llvm_alloca)
 
     @multimethod
+    def emit_value(self, value: BoundedField):
+        llvm_offset = self.emit_offset(value)
+        return self.llvm_builder.load(llvm_offset)
+
+    @multimethod
     def emit_value(self, value: IntegerConstant):
         llvm_type = self.llvm_types[value.type]
         return ir.Constant(llvm_type, value.value)
@@ -2885,9 +3080,18 @@ class FunctionCodegen:
 
     @multimethod
     def emit_value(self, value: NewInstruction):
+        if value.arguments:
+            raise Diagnostic(value.location, DiagnosticSeverity.Error, "Not implemented constructors")
+
         llvm_type = self.llvm_types[value.type]
-        llvm_alloca = self.llvm_builder.alloca(llvm_type)
-        return self.llvm_builder.load(llvm_alloca)
+        if value.type.is_pointer:
+            # allocate memory for type from heap (GC in future)
+            llvm_size = self.emit_sizeof(value.type)
+            llvm_instance = self.llvm_builder.call(self.parent.llvm_malloc, [llvm_size])
+            llvm_instance = self.llvm_builder.bitcast(llvm_instance, self.parent.llvm_types[value.type])
+            return llvm_instance
+        else:
+            return ir.Constant(llvm_type, None)
 
     @multimethod
     def emit_target(self, value: TargetValue):
@@ -2900,6 +3104,19 @@ class FunctionCodegen:
     @multimethod
     def emit_target(self, value: Variable):
         return self.llvm_variables[value]
+
+    @multimethod
+    def emit_target(self, value: BoundedField):
+        return self.emit_offset(value)
+
+    def emit_offset(self, value: BoundedField):
+        index = cast(ClassType, value.instance.type).fields.index(value.field)
+        llvm_instance = self.emit_value(value.instance)
+
+        return self.llvm_builder.gep(llvm_instance, [
+            ir.Constant(ir.IntType(32), 0),
+            ir.Constant(ir.IntType(32), index),
+        ])
 
 
 def load_source_content(location: Location, before=2, after=2):

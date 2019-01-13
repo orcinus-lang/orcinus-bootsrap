@@ -1,0 +1,8 @@
+# EXIT: 20
+class A:
+    a: int
+
+def main() -> int:
+    a = A()
+    a.a = 20
+    return a.a

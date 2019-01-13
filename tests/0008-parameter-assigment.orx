@@ -1,0 +1,7 @@
+# EXIT: 20
+def test(v: int) -> int:
+    v = 20
+    return v
+
+def main() -> int:
+    return test(10)

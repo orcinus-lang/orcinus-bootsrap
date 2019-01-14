@@ -1,0 +1,10 @@
+# EXIT: 123
+
+class Example[T]:
+    field: T
+
+
+def main() -> int:
+    example = Example[int]()
+    example.field = 123
+    return example.field

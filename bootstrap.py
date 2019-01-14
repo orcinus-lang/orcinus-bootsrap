@@ -1771,7 +1771,7 @@ class SemanticModel:
     @multimethod
     def emit_symbol(self, node: SubscribeExpressionAST, is_exists: bool) -> Symbol:
         symbol = self.emit_symbol(node.value, True)
-        arguments = [self.emit_symbol(arg) for arg in node.arguments]
+        arguments = [self.emit_symbol(arg, True) for arg in node.arguments]
 
         if isinstance(symbol, Type):
             return symbol.instantiate(self.module, arguments, node.location)
@@ -1813,6 +1813,18 @@ class InstantiateContext:
 
         self.register(generic, result_type)
         return result_type
+
+    @multimethod
+    def instantiate(self, field: Field, location: Location) -> Field:
+        if field in self.__mapping:
+            return self.__mapping[field]
+
+        new_owner = self.instantiate(field.owner, location)
+        new_type = self.instantiate(field.type, location)
+        new_field = Field(new_owner, field.name, new_type, field.location)
+
+        self.register(field, new_field)
+        return new_field
 
     @multimethod
     def instantiate(self, statement: Statement, location: Location):
@@ -2388,6 +2400,12 @@ class ClassType(Type):
             context = InstantiateContext(module)
             context.aggregate(self.generic_parameters, generic_arguments)
             instance = ClassType(module, self.name, self.location, generic_arguments=generic_arguments, definition=self)
+            context.register(self, instance)
+
+            for member in self.members:
+                new_member = context.instantiate(member, location)
+                instance.add_member(new_member)
+
         module.register_instance(self.definition or self, generic_arguments, instance)
         return instance
 

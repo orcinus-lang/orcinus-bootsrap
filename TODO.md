@@ -20,7 +20,7 @@ Minimum viable product (MVP)
         - [ ] Function overload (required type checking)
     - [ ] Type checks:
         - [ ] Check function parameters and arguments 
-        - [ ] Check function return type and type of `return` statement
+        - [x] Check function return type and type of `return` statement
         - [ ] Interface type inference
     - [ ] Function statements:
         - [ ] Parameters using.
@@ -29,8 +29,8 @@ Minimum viable product (MVP)
         - [x] Function call 
         - [ ] Return default value
     - [ ] Types:
-        - [ ] Constants of integer type: e.g. `1`, `2`, `-3`
-        - [ ] Constants of boolean type: `True` and `False`
+        - [x] Constants of integer type: e.g. `1`, `2`, `-3`
+        - [x] Constants of boolean type: `True` and `False`
         - [ ] Constant of void type: `None`
         - [ ] Struct types
         - [ ] Class types

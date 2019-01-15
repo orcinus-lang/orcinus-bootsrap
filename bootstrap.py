@@ -91,6 +91,13 @@ class TokenID(enum.IntEnum):
     Struct = enum.auto()
     Class = enum.auto()
     Equals = enum.auto()
+    Star = enum.auto()
+    DoubleStar = enum.auto()
+    Plus = enum.auto()
+    Minus = enum.auto()
+    Slash = enum.auto()
+    DoubleSlash = enum.auto()
+    Tilde = enum.auto()
 
 
 @dataclass
@@ -264,7 +271,14 @@ class Scanner:
         (r':', TokenID.Colon),
         (r';', TokenID.Semicolon),
         (r'=', TokenID.Equals),
+        (r'\*\*', TokenID.DoubleStar),
+        (r'\*', TokenID.Star),
+        (r'\+', TokenID.Plus),
         (r'\-\>', TokenID.Then),
+        (r'\-', TokenID.Minus),
+        (r'\/\/', TokenID.DoubleSlash),
+        (r'\/', TokenID.Slash),
+        (r'\~', TokenID.Tilde),
 
         (r'\n', TokenID.NewLine),
         (r'\r\n', TokenID.NewLine),
@@ -900,11 +914,144 @@ class Parser:
         expression:
             atom
         """
-        return self.parse_atom_expression()
+        return self.parse_addition_expression()
 
-    def parse_atom_expression(self) -> ExpressionAST:
+    def parse_addition_expression(self) -> ExpressionAST:
         """
-        atom:
+        addition_expression:
+            multiplication_expression
+            addition_expression '+' multiplication_expression
+            addition_expression '-' multiplication_expression
+        """
+        expression = self.parse_multiplication_expression()
+        while self.match(TokenID.Plus, TokenID.Minus):
+            if self.match(TokenID.Plus):
+                tok_operator = self.consume(TokenID.Plus)
+                right_operand = self.parse_unary_expression()
+
+                # noinspection PyArgumentList
+                expression = BinaryExpressionAST(
+                    operator=BinaryID.Add,
+                    left_operand=expression,
+                    right_operand=right_operand,
+                    location=tok_operator.location
+                )
+            elif self.match(TokenID.Minus):
+                tok_operator = self.consume(TokenID.Minus)
+                right_operand = self.parse_unary_expression()
+
+                # noinspection PyArgumentList
+                expression = BinaryExpressionAST(
+                    operator=BinaryID.Sub,
+                    left_operand=expression,
+                    right_operand=right_operand,
+                    location=tok_operator.location,
+                )
+        return expression
+
+    def parse_multiplication_expression(self) -> ExpressionAST:
+        """
+        multiplication_expression:
+            unary_expression
+            multiplication_expression '*' unary_expression
+            # multiplication_expression '@' multiplication_expression
+            multiplication_expression '//' unary_expression
+            multiplication_expression '/' unary_expression
+            # multiplication_expression '%' unary_expression
+        """
+        expression = self.parse_unary_expression()
+        while self.match(TokenID.Star, TokenID.Slash, TokenID.DoubleSlash):
+            if self.match(TokenID.Star):
+                tok_operator = self.consume(TokenID.Star)
+                right_operand = self.parse_unary_expression()
+
+                # noinspection PyArgumentList
+                expression = BinaryExpressionAST(
+                    operator=BinaryID.Mul,
+                    left_operand=expression,
+                    right_operand=right_operand,
+                    location=tok_operator.location,
+                )
+
+            elif self.match(TokenID.Slash):
+                tok_operator = self.consume(TokenID.Slash)
+                right_operand = self.parse_unary_expression()
+
+                # noinspection PyArgumentList
+                expression = BinaryExpressionAST(
+                    operator=BinaryID.Div,
+                    left_operand=expression,
+                    right_operand=right_operand,
+                    location=tok_operator.location,
+                )
+
+            elif self.match(TokenID.DoubleSlash):
+                tok_operator = self.consume(TokenID.DoubleSlash)
+                right_operand = self.parse_unary_expression()
+
+                # noinspection PyArgumentList
+                expression = BinaryExpressionAST(
+                    operator=BinaryID.DoubleDiv,
+                    left_operand=expression,
+                    right_operand=right_operand,
+                    location=tok_operator.location,
+                )
+
+        return expression
+
+    def parse_unary_expression(self) -> ExpressionAST:
+        """
+        u_expr:
+            power
+            "-" u_expr
+            "+" u_expr
+            "~" u_expr
+        """
+        if self.match(TokenID.Minus):
+            tok_operator = self.consume(TokenID.Minus)
+            operand = self.parse_unary_expression()
+
+            # noinspection PyArgumentList
+            return UnaryExpressionAST(operator=UnaryID.Neg, operand=operand, location=tok_operator.location)
+
+        elif self.match(TokenID.Plus):
+            tok_operator = self.consume(TokenID.Plus)
+            operand = self.parse_unary_expression()
+
+            # noinspection PyArgumentList
+            return UnaryExpressionAST(operator=UnaryID.Pos, operand=operand, location=tok_operator.location)
+
+        elif self.match(TokenID.Tilde):
+            tok_operator = self.consume(TokenID.Tilde)
+            operand = self.parse_unary_expression()
+
+            # noinspection PyArgumentList
+            return UnaryExpressionAST(operator=UnaryID.Inv, operand=operand, location=tok_operator.location)
+
+        return self.parse_power_expression()
+
+    def parse_power_expression(self) -> ExpressionAST:
+        """
+        power:
+            primary ["**" u_expr]
+        """
+        expression = self.parse_primary_expression()
+        if self.match(TokenID.DoubleStar):
+            tok_operator = self.consume(TokenID.DoubleStar)
+            unary_expression = self.parse_unary_expression()
+
+            # noinspection PyArgumentList
+            expression = BinaryExpressionAST(
+                operator=BinaryID.Pow,
+                left_operand=expression,
+                right_operand=unary_expression,
+                location=tok_operator.location
+            )
+        return expression
+
+    def parse_primary_expression(self) -> ExpressionAST:
+        """
+        primary:
              number_expression
              name_expression
              call_expression
@@ -1147,6 +1294,37 @@ class IntegerExpressionAST(ExpressionAST):
 @dataclass(unsafe_hash=True, frozen=True)
 class NamedExpressionAST(ExpressionAST):
     name: str
+
+
+@enum.unique
+class UnaryID(enum.IntEnum):
+    Not = enum.auto()
+    Pos = enum.auto()
+    Neg = enum.auto()
+    Inv = enum.auto()
+
+
+@dataclass(unsafe_hash=True, frozen=True)
+class UnaryExpressionAST(ExpressionAST):
+    operator: UnaryID
+    operand: ExpressionAST
+
+
+@enum.unique
+class BinaryID(enum.IntEnum):
+    Add = enum.auto()
+    Sub = enum.auto()
+    Mul = enum.auto()
+    Div = enum.auto()
+    DoubleDiv = enum.auto()
+    Pow = enum.auto()
+
+
+@dataclass(unsafe_hash=True, frozen=True)
+class BinaryExpressionAST(ExpressionAST):
+    operator: BinaryID
+    left_operand: ExpressionAST
+    right_operand: ExpressionAST
 
 
 @dataclass(unsafe_hash=True, frozen=True)

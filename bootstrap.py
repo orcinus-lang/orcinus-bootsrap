@@ -435,8 +435,10 @@ class Scanner:
 
 class Parser:
     MEMBERS_STARTS = (TokenID.Pass, TokenID.Def, TokenID.Class, TokenID.Struct, TokenID.Name)
-    EXPRESSION_STARTS = (TokenID.Number, TokenID.Name, TokenID.LeftParenthesis)
-    STATEMENT_STARTS = (TokenID.Pass, TokenID.Return, TokenID.While, TokenID.If) + EXPRESSION_STARTS
+    EXPRESSION_STARTS = (
+        TokenID.Number, TokenID.Name, TokenID.LeftParenthesis, TokenID.Plus, TokenID.Minus, TokenID.Tilde
+    )
+    STATEMENT_STARTS = EXPRESSION_STARTS + (TokenID.Pass, TokenID.Return, TokenID.While, TokenID.If)
 
     def __init__(self, filename, stream):
         self.tokens = list(Scanner(filename, stream))
@@ -720,11 +722,15 @@ class Parser:
     def parse_parameter(self) -> ParameterAST:
         """
         parameter:
-            Name ':' type
+            Name [ ':' type ]
         """
         tok_name = self.consume(TokenID.Name)
-        self.consume(TokenID.Colon)
-        param_type = self.parse_type()
+        if self.match(TokenID.Colon):
+            self.consume(TokenID.Colon)
+            param_type = self.parse_type()
+        else:
+            # noinspection PyArgumentList
+            param_type = AutoTypeAST(location=tok_name.location)
 
         # noinspection PyArgumentList
         return ParameterAST(name=tok_name.value, type=param_type, location=tok_name.location)
@@ -1192,6 +1198,11 @@ class NamedTypeAST(TypeAST):
 
 
 @dataclass(unsafe_hash=True, frozen=True)
+class AutoTypeAST(TypeAST):
+    pass
+
+
+@dataclass(unsafe_hash=True, frozen=True)
 class MemberAST(NodeAST):
     pass
 
@@ -1202,16 +1213,18 @@ class PassMemberAST(MemberAST):
 
 
 @dataclass(unsafe_hash=True, frozen=True)
-class StructAST(MemberAST):
+class TypeDeclarationAST(MemberAST):
     name: str
-    generic_parameters: Sequence[GenericParameterAST]
     members: Sequence[MemberAST]
 
 
 @dataclass(unsafe_hash=True, frozen=True)
-class ClassAST(MemberAST):
-    name: str
-    members: Sequence[MemberAST]
+class StructAST(TypeDeclarationAST):
+    generic_parameters: Sequence[GenericParameterAST]
+
+
+@dataclass(unsafe_hash=True, frozen=True)
+class ClassAST(TypeDeclarationAST):
     generic_parameters: Sequence[GenericParameterAST]
 
 
@@ -1557,19 +1570,30 @@ class SemanticModel:
         if not symbol:
             return None
 
-        self.symbols[node] = symbol
-
         # Declare symbol in parent scope
+        self.symbols[node] = symbol
         if scope is not None and isinstance(symbol, NamedSymbol):
             scope.append(symbol)
+        if parent:
+            parent.add_member(symbol)
 
-        # Add members
+        types = []
+        functions = []
+        others = []
+
+        # Collect types
         if hasattr(node, 'members'):
-            child_scope = self.scopes[node]
             for child in node.members:
-                child_symbol = self.declare_symbol(child, child_scope, symbol)
-                if child_symbol:
-                    symbol.add_member(child_symbol)
+                if isinstance(child, TypeDeclarationAST):
+                    types.append(child)
+                elif isinstance(child, FunctionAST):
+                    functions.append(child)
+                else:
+                    others.append(child)
+
+        child_scope = self.scopes[node]
+        for child in itertools.chain(types, functions, others):
+            self.declare_symbol(child, child_scope, symbol)
 
         return symbol
 
@@ -1615,7 +1639,7 @@ class SemanticModel:
     # noinspection PyUnusedLocal
     @multimethod
     def annotate_symbol(self, node: ModuleAST, parent=None) -> Module:
-        return Module(self.module_name, Location(node.location.filename))
+        return Module(self.context, self.module_name, Location(node.location.filename))
 
     @multimethod
     def annotate_symbol(self, node: PassMemberAST, parent: ContainerSymbol) -> Optional[Symbol]:
@@ -1625,7 +1649,11 @@ class SemanticModel:
     def annotate_symbol(self, node: FunctionAST, parent: ContainerSymbol) -> Function:
         scope = self.scopes[node]
         generic_parameters = self.annotate_generics(scope, node.generic_parameters)
-        parameters = [self.resolve_type(param.type) for param in node.parameters]
+        if isinstance(parent, Type) and node.parameters and isinstance(node.parameters[0].type, AutoTypeAST):
+            parameters = [parent]
+            parameters.extend(self.resolve_type(param.type) for param in node.parameters[1:])
+        else:
+            parameters = [self.resolve_type(param.type) for param in node.parameters]
         return_type = self.resolve_type(node.return_type)
         func_type = FunctionType(self.module, parameters, return_type, node.location)
         func = Function(parent, node.name, func_type, node.location, generic_parameters=generic_parameters)
@@ -1767,6 +1795,15 @@ class SemanticModel:
             return functions[0]
         return None
 
+    def resolve_function(self, scope: LexicalScope, name: str, arguments: Sequence[Value], location: Location) \
+            -> Function:
+        func = self.find_function(scope, name, arguments, location)
+        if not func:
+            arguments = ', '.join(str(arg.type) for arg in arguments)
+            message = f'Not found function ‘{name}({arguments})’ in current scope'
+            raise Diagnostic(location, DiagnosticSeverity.Error, message)
+        return func
+
     @multimethod
     def emit_statement(self, node: StatementAST) -> Statement:
         raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented statement emitting")
@@ -1894,7 +1931,7 @@ class SemanticModel:
 
         # function call
         if isinstance(symbol, Overload):
-            func = self.find_function(self.scopes[node], symbol.name, arguments, node.location)
+            func = self.resolve_function(self.scopes[node], symbol.name, arguments, node.location)
             return CallInstruction(func, arguments, node.location)
 
         # type instance instantiate
@@ -1902,6 +1939,38 @@ class SemanticModel:
             return NewInstruction(symbol, arguments, node.location)
 
         raise Diagnostic(node.location, DiagnosticSeverity.Error, f'Not found function for call')
+
+    @multimethod
+    def emit_value(self, node: UnaryExpressionAST) -> Value:
+        arguments = [self.emit_value(node.operand)]
+
+        if node.operator == UnaryID.Pos:
+            func = self.resolve_function(self.scopes[node], '__pos__', arguments, node.location)
+        elif node.operator == UnaryID.Neg:
+            func = self.resolve_function(self.scopes[node], '__neg__', arguments, node.location)
+        elif node.operator == UnaryID.Not:
+            func = self.resolve_function(self.scopes[node], '__not__', arguments, node.location)
+        else:
+            raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented unary operator")
+
+        return CallInstruction(func, arguments, node.location)
+
+    @multimethod
+    def emit_value(self, node: BinaryExpressionAST) -> Value:
+        arguments = [self.emit_value(node.left_operand), self.emit_value(node.right_operand)]
+
+        if node.operator == BinaryID.Add:
+            func = self.resolve_function(self.scopes[node], '__add__', arguments, node.location)
+        elif node.operator == BinaryID.Sub:
+            func = self.resolve_function(self.scopes[node], '__sub__', arguments, node.location)
+        elif node.operator == BinaryID.Mul:
+            func = self.resolve_function(self.scopes[node], '__mul__', arguments, node.location)
+        elif node.operator == BinaryID.Div:
+            func = self.resolve_function(self.scopes[node], '__div__', arguments, node.location)
+        else:
+            raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented binary operator")
+
+        return CallInstruction(func, arguments, node.location)
 
     @multimethod
     def emit_symbol(self, node: ExpressionAST, is_exists: bool) -> Symbol:
@@ -2455,7 +2524,7 @@ class Value(Symbol, abc.ABC):
 
 
 class Module(NamedSymbol, ContainerSymbol):
-    def __init__(self, name, location: Location):
+    def __init__(self, context: SemanticContext, name, location: Location):
         super(Module, self).__init__()
 
         self.__name = name
@@ -2602,6 +2671,9 @@ class StructType(Type):
 class FunctionType(Type):
     def __init__(self, owner: ContainerSymbol, parameters: Sequence[Type], return_type: Type, location: Location):
         super(FunctionType, self).__init__(owner, "Function", location)
+
+        assert return_type is not None
+        assert all(param_type is not None for param_type in parameters)
 
         self.__return_type = return_type
         self.__parameters = parameters
@@ -2965,7 +3037,7 @@ class LazyDict(dict):
 
 
 class ModuleCodegen:
-    def __init__(self, name='<stdin>'):
+    def __init__(self, context: SemanticContext, name='<stdin>'):
         self.llvm_module = ir.Module(name)
         self.llvm_module.triple = binding.Target.from_default_triple().triple
 
@@ -2976,6 +3048,10 @@ class ModuleCodegen:
         # symbol to llvm
         self.llvm_types = LazyDict(builder=self.declare_type, initializer=self.initialize_type)
         self.llvm_functions = LazyDict(builder=self.declare_function)
+
+        # builtins functions
+        self.context = context
+        self.builtins = BuiltinsCodegen(self)
 
     def __str__(self):
         return str(self.llvm_module)
@@ -3270,6 +3346,10 @@ class FunctionCodegen:
 
     @multimethod
     def emit_value(self, value: CallInstruction):
+        emitter = self.parent.builtins.emitters.get(value.function)
+        if emitter:
+            return emitter(self, value.function, value.arguments, value.location)
+
         llvm_args = [self.emit_value(arg) for arg in value.arguments]
         llvm_func = self.llvm_functions[value.function]
         return self.llvm_builder.call(llvm_func, llvm_args)
@@ -3313,6 +3393,43 @@ class FunctionCodegen:
             ir.Constant(ir.IntType(32), 0),
             ir.Constant(ir.IntType(32), index),
         ])
+
+
+class BuiltinsCodegen:
+    def __init__(self, parent: ModuleCodegen):
+        builtins_module = parent.context.builtins_module
+        integer_type = parent.context.integer_type
+
+        self.emitters = {
+            integer_type.scope.resolve('__pos__').functions[0]: self.int_pos,
+            integer_type.scope.resolve('__neg__').functions[0]: self.int_neg,
+            integer_type.scope.resolve('__add__').functions[0]: self.int_add,
+            integer_type.scope.resolve('__sub__').functions[0]: self.int_sub,
+            integer_type.scope.resolve('__mul__').functions[0]: self.int_mul,
+        }
+
+    @staticmethod
+    def int_pos(self: FunctionCodegen, func: Function, arguments: Sequence[Value], location: Location):
+        return self.emit_value(arguments[0])
+
+    @staticmethod
+    def int_neg(self: FunctionCodegen, func: Function, arguments: Sequence[Value], location: Location):
+        return self.llvm_builder.neg(self.emit_value(arguments[0]))
+
+    @staticmethod
+    def int_add(self: FunctionCodegen, func: Function, arguments: Sequence[Value], location: Location):
+        llvm_args = (self.emit_value(arg) for arg in arguments)
+        return self.llvm_builder.add(*llvm_args)
+
+    @staticmethod
+    def int_sub(self: FunctionCodegen, func: Function, arguments: Sequence[Value], location: Location):
+        llvm_args = (self.emit_value(arg) for arg in arguments)
+        return self.llvm_builder.sub(*llvm_args)
+
+    @staticmethod
+    def int_mul(self: FunctionCodegen, func: Function, arguments: Sequence[Value], location: Location):
+        llvm_args = (self.emit_value(arg) for arg in arguments)
+        return self.llvm_builder.mul(*llvm_args)
 
 
 def load_source_content(location: Location, before=2, after=2):
@@ -3409,7 +3526,7 @@ def build(filenames: Sequence[str]):
     context = SemanticContext()
     for filename in filenames:
         module = context.open(filename)
-        generator = ModuleCodegen(module.name)
+        generator = ModuleCodegen(context, module.name)
         generator.emit(module)
         print(generator)
 

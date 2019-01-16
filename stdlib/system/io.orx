@@ -1,0 +1,46 @@
+
+# Specifies the position in a stream to use for seeking.
+enum SeekOrigin:
+    Begin = 0       # start of the stream (the default); offset should be zero or positive
+    Current = 1     # current stream position; offset may be negative
+    End = 2         # end of the stream; offset is usually negative
+
+
+interface Stream:
+    # Close
+    def close(self): ...
+
+    # Flush the write buffers of the stream if applicable.
+    def flush(self): ...
+
+    # Read and return at most size characters from the stream as a single str.
+    # If size is negative or None, reads until EOF.
+    def read(self, size: int = -1) -> str: ...
+
+    # Read until newline or EOF and return a single str.
+    # If the stream is already at EOF, an empty string is returned.
+    def readline(self, size: int = -1) -> str: ...
+
+    # Write the string ti stream abd returns the number of character written.
+    def write(self, value: str) -> int: ...
+
+    # Change the stream position to the given byte `offset`.
+    # `offset` is interpreted relative to the position indicated by `whence`.
+    def seek(self, offset: int, origin: SeekOrigin): ...
+
+    # Return the current stream position
+    def tell() -> int: ...
+
+    # Returns length of file
+    def __len__(self) -> int: ...
+
+def open(path: str, mode: str) -> Stream: ...
+
+
+# For support `with` clause
+def __enter__(stream: Stream) -> Stream:
+    return stream
+
+# For support `with` clause
+def __exit__(stream: Stream):
+    stream.close()

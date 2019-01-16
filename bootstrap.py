@@ -98,6 +98,7 @@ class TokenID(enum.IntEnum):
     Slash = enum.auto()
     DoubleSlash = enum.auto()
     Tilde = enum.auto()
+    String = enum.auto()
 
 
 @dataclass
@@ -1927,7 +1928,7 @@ class SemanticModel:
     def emit_value(self, node: CallExpressionAST) -> Value:
         arguments = [self.emit_value(arg) for arg in node.arguments]
 
-        symbol = self.emit_symbol(node.value, True)
+        symbol = self.emit_symbol(node.value, False)
 
         # function call
         if isinstance(symbol, Overload):
@@ -1937,6 +1938,11 @@ class SemanticModel:
         # type instance instantiate
         elif isinstance(symbol, Type):
             return NewInstruction(symbol, arguments, node.location)
+
+        # instance function call (uniform calls)
+        elif not symbol and isinstance(node.value, NamedExpressionAST):
+            func = self.resolve_function(self.scopes[node], node.value.name, arguments, node.location)
+            return CallInstruction(func, arguments, node.location)
 
         raise Diagnostic(node.location, DiagnosticSeverity.Error, f'Not found function for call')
 

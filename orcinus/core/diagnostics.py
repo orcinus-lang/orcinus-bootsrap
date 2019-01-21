@@ -89,3 +89,6 @@ class DiagnosticManager(Sequence):
 
     def hint(self, location: Location, message: str, source: str = "orcinus"):
         return self.add(location, DiagnosticSeverity.Hint, message, source)
+
+    def clear(self):
+        self.__diagnostics.clear()

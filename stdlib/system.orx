@@ -1,0 +1,3 @@
+
+# Exit from application. Returns `status` as result of application execution
+def exit(status: int): ...

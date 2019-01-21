@@ -231,10 +231,10 @@ class Parser:
     def parse_pass_member(self) -> PassMemberAST:
         """ pass_member: pass """
         tok_pass = self.consume(TokenID.Pass)
-        self.consume(TokenID.NewLine)
+        tok_newline = self.consume(TokenID.NewLine)
 
         # noinspection PyArgumentList
-        return PassMemberAST(location=tok_pass.location)
+        return PassMemberAST(tok_pass=tok_pass, tok_newline=tok_newline)
 
     def parse_named_member(self) -> FieldAST:
         """
@@ -266,7 +266,7 @@ class Parser:
         else:
             # noinspection PyArgumentList
             tok_then = None
-            return_type = NamedTypeAST(name='void', location=tok_name.location)
+            return_type = AutoTypeAST(location=tok_name.location)
         tok_colon = self.consume(TokenID.Colon)
         statement = self.parse_function_statement()
 
@@ -370,10 +370,10 @@ class Parser:
     def parse_pass_statement(self) -> StatementAST:
         """ pass_statement: pass """
         tok_pass = self.consume(TokenID.Pass)
-        self.consume(TokenID.NewLine)
+        tok_newline = self.consume(TokenID.NewLine)
 
         # noinspection PyArgumentList
-        return PassStatementAST(location=tok_pass.location)
+        return PassStatementAST(tok_pass=tok_pass, tok_newline=tok_newline)
 
     def parse_return_statement(self) -> StatementAST:
         """

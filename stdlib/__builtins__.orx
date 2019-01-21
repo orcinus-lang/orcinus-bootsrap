@@ -17,30 +17,3 @@ class str: ...
 
 # Unicode character type. Internally it's a 32-bit integer type
 struct char: ...
-
-#interface Length:
-#    def __len__(self) -> int: ...
-#
-#
-## Array type
-#class Array[T]:
-#    def __len__(self) -> int: ...
-#    def __getitem__(self, idx: int) -> T: ...
-#    def __setitem__(self, idx: int, value: T): ...
-#
-#
-## Returns length of collection
-#def len[T](value: T) -> int where T(Length):
-#    return value.__len__()
-#
-## Returns True, if integer is not default(zero)
-#def __bool__(value: int) -> bool:
-#    return value != 0
-#
-## Returns False for any void value.
-#def __bool__(value: void) -> bool:
-#    return False
-#
-## Return True, if collection is not empty
-#def __bool__[T](value: T) -> bool where T(Length):
-#    return len(value) != 0

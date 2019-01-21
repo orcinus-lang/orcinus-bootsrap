@@ -9,7 +9,7 @@ import os
 import urllib.parse
 import weakref
 
-from orcinus.core.diagnostics import DiagnosticManager
+from orcinus.core.diagnostics import DiagnosticManager, Diagnostic
 from orcinus.language import ModuleAST, SemanticModel, Module, Parser
 from orcinus.language.semantic import SemanticContext
 from orcinus.utils import cached_property
@@ -80,8 +80,13 @@ class Document:
     def model(self) -> SemanticModel:
         """ Returns semantic model """
         if not self.__model:
-            context = SemanticContext(self.workspace)
-            self.__model = context.open(self)
+            try:
+                context = SemanticContext(self.workspace)
+                self.__model = context.open(self)
+            except Diagnostic as ex:
+                self.diagnostics.add(ex.location, ex.severity, ex.message, ex.source)
+            finally:
+                self.workspace.on_document_analyze(document=self)
         return self.__model
 
     @property
@@ -93,6 +98,7 @@ class Document:
 
     def invalidate(self):
         """ Invalidate document, e.g. detach syntax tree or semantic model from this document """
+        self.diagnostics.clear()
         self.__module = None
         self.__model = None
         self.__tree = None

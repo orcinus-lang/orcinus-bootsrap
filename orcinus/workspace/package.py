@@ -55,7 +55,10 @@ class Package:
         if source is None:
             with open(url.path, 'r', encoding='utf-8') as stream:
                 source = stream.read()
-        return Document(self, doc_uri, name=name, source=source, version=version)
+        document = Document(self, doc_uri, name=name, source=source, version=version)
+        self.documents[doc_uri] = document
+        self.workspace.on_document_create(document=document)
+        return document
 
     def update_document(self, doc_uri: str, source=None, version=None) -> Document:
         """ Update source of document """
@@ -67,9 +70,12 @@ class Package:
     def unload_document(self, doc_uri: str):
         """ Unload document from package """
         try:
+            document = self.documents[doc_uri]
             del self.documents[doc_uri]
         except KeyError:
             pass
+        else:
+            self.workspace.on_document_remove(document=document)
 
     def __str__(self) -> str:
         return f'{self.name} [{self.path}]'

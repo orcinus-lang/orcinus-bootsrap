@@ -384,7 +384,16 @@ class MemberAST(SyntaxNode):
 
 @dataclass(unsafe_hash=True, frozen=True)
 class PassMemberAST(MemberAST):
-    pass
+    tok_pass: SyntaxToken
+    tok_newline: SyntaxToken
+
+    @property
+    def location(self) -> Location:
+        return self.tok_pass.location
+
+    @property
+    def children(self) -> Sequence[SyntaxSymbol]:
+        return [self.tok_pass, self.tok_newline]
 
 
 @dataclass(unsafe_hash=True, frozen=True)
@@ -547,7 +556,16 @@ class ElseStatementAST(StatementAST):
 
 @dataclass(unsafe_hash=True, frozen=True)
 class PassStatementAST(StatementAST):
-    pass
+    tok_pass: SyntaxToken
+    tok_newline: SyntaxToken
+
+    @property
+    def location(self) -> Location:
+        return self.tok_pass.location
+
+    @property
+    def children(self) -> Sequence[SyntaxSymbol]:
+        return [self.tok_pass, self.tok_newline]
 
 
 @dataclass(unsafe_hash=True, frozen=True)

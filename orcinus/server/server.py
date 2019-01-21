@@ -6,10 +6,11 @@ from typing import Optional
 from jsonrpc import Dispatcher, JSONRPCResponseManager
 from jsonrpc.jsonrpc2 import JSONRPC20Request
 
-from orcinus.server.constants import TextDocumentSyncKind
-from orcinus.server.converters import from_lsp_position
-from orcinus.server.workspace import Workspace
+from orcinus.core.diagnostics import DiagnosticManager
+from orcinus.server.constants import TextDocumentSyncKind, DOCUMENT_PUBLISH_DIAGNOSTICS
+from orcinus.server.converters import from_lsp_position, to_lsp_diagnostic
 # from orcinus.syntax import AliasAST, ImportModuleAST
+from orcinus.workspace import Workspace, Document
 
 logger = logging.getLogger('orcinus.server')
 
@@ -41,7 +42,7 @@ class LanguageTCPServer:
         finally:
             self.server.close()
 
-    def process(self,connection, client_address):
+    def process(self, connection, client_address):
         try:
             logger.debug('Connection from {}:{}'.format(*client_address))
             client = LanguageTCPClient(self, connection)
@@ -167,9 +168,9 @@ class LanguageTCPClient:
             logger.debug(f"Start from process {processId}")
 
         if workspaceFolders:
-            self.__workspace = Workspace(self, workspaceFolders)
+            self.__workspace = Workspace(workspaceFolders)
         else:
-            self.__workspace = Workspace(self, [rootUri])
+            self.__workspace = Workspace([rootUri])
 
         # InitializeResult
         return self.capabilities
@@ -184,14 +185,14 @@ class LanguageTCPClient:
 
     def text_document_open(self, textDocument):
         logger.info(f"Open document: {textDocument['uri']}")
-        self.workspace.append_document(textDocument['uri'], textDocument['text'], textDocument['version'])
-        self.workspace.analyze(textDocument['uri'])
+        document = self.workspace.update_document(textDocument['uri'], textDocument['text'], textDocument['version'])
+        self.analyze(document)
 
     def text_document_change(self, textDocument, contentChanges):
         logger.debug(f"Change document: {textDocument['uri']}")
         document = self.workspace.get_or_create_document(textDocument['uri'])
         document.source = contentChanges[0]['text']
-        self.workspace.analyze(textDocument['uri'])
+        self.analyze(document)
 
     def text_document_close(self, textDocument):
         logger.info(f"Close document: {textDocument['uri']}")
@@ -202,7 +203,7 @@ class LanguageTCPClient:
         position = from_lsp_position(position, is_end=True)
         logger.debug(f"Completion document: {textDocument['uri']} on position {position}")
 
-        node = document.tree.find_position(position)
+        # node = document.tree.find_position(position)
         items = []
 
         # if isinstance(node, (AliasAST, ImportModuleAST)):
@@ -224,3 +225,11 @@ class LanguageTCPClient:
             'isIncomplete': False,
             'items': items
         }
+
+    def publish_diagnostics(self, doc_uri: str, diagnostics: DiagnosticManager):
+        diagnostics = tuple(map(to_lsp_diagnostic, diagnostics))
+        self.notify(DOCUMENT_PUBLISH_DIAGNOSTICS, params={'uri': doc_uri, 'diagnostics': diagnostics})
+
+    def analyze(self, document: Document):
+        document.model
+        self.publish_diagnostics(document.uri, document.diagnostics)

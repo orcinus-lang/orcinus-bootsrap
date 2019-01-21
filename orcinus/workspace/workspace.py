@@ -10,6 +10,7 @@ import urllib.parse
 from typing import Sequence, Optional
 
 from orcinus.exceptions import OrcinusError
+from orcinus.signals import Signal
 from orcinus.workspace.document import Document
 from orcinus.workspace.package import Package
 from orcinus.workspace.utils import convert_filename
@@ -23,6 +24,10 @@ class Workspace:
     """
     packages: Sequence[Package]
 
+    on_document_create: Signal  # (document: Document) -> void
+    on_document_remove: Signal  # (document: Document) -> void
+    on_document_analyze: Signal  # (document: Document) -> void
+
     def __init__(self, paths: Sequence[str] = None):
         paths = list(() or paths)
 
@@ -32,8 +37,13 @@ class Workspace:
             paths.insert(0, stdlib_path)
 
         self.packages = [
-            Package(self, os.path.abspath(path)) for path in paths
+            Package(self, os.path.abspath(urllib.parse.urlparse(path).path)) for path in paths
         ]
+
+        # signals
+        self.on_document_create = Signal()
+        self.on_document_remove = Signal()
+        self.on_document_analyze = Signal()
 
     def get_package_for_document(self, doc_uri: str):
         url = urllib.parse.urlparse(doc_uri)

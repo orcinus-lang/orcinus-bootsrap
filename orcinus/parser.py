@@ -22,8 +22,13 @@ class Parser:
         self.index = 0
 
     @property
-    def current_token(self) -> Token:
+    def current_token(self) -> SyntaxToken:
         return self.tokens[self.index]
+
+    @property
+    def previous_location(self) -> Location:
+        location = self.current_token.location
+        return Location(location.filename, location.begin, location.begin)
 
     def match(self, *indexes: TokenID) -> bool:
         """
@@ -34,7 +39,7 @@ class Parser:
         """
         return self.current_token.id in indexes
 
-    def consume(self, *indexes: TokenID) -> Token:
+    def consume(self, *indexes: TokenID) -> SyntaxToken:
         """
         Consume current token
 
@@ -57,19 +62,6 @@ class Parser:
             message = f"Required `{required_name}`, but got `{existed_name}`"
         raise Diagnostic(self.current_token.location, DiagnosticSeverity.Error, message)
 
-    def try_consume(self, *indexes: TokenID) -> bool:
-        """
-        Try consume current token
-
-        :param indexes:     Token identifiers
-        :return: True, if current token is matched passed identifiers
-        """
-        if not self.match(*indexes):
-            return False
-
-        self.consume(*indexes)
-        return True
-
     def parse(self) -> ModuleAST:
         """
         Parse module from source
@@ -77,12 +69,11 @@ class Parser:
         module:
             members EndFile
         """
-        location = self.tokens[0].location + self.tokens[-1].location
         members = self.parse_members()
-        self.consume(TokenID.EndFile)
+        tok_eof = self.consume(TokenID.EndFile)
 
         # noinspection PyArgumentList
-        return ModuleAST(members=members, location=location)
+        return ModuleAST(members=members, tok_eof=tok_eof)
 
     def parse_type(self) -> TypeAST:
         """
@@ -105,7 +96,7 @@ class Parser:
         tok_name = self.consume(TokenID.Name)
 
         # noinspection PyArgumentList
-        return NamedTypeAST(name=tok_name.value, location=tok_name.location)
+        return NamedTypeAST(tok_name=tok_name)
 
     def parse_generic_parameters(self) -> Sequence[GenericParameterAST]:
         """
@@ -113,16 +104,18 @@ class Parser:
             : [ '[' generic_parameter { ',' generic_parameter } ] ']' ]
         """
         if not self.match(TokenID.LeftSquare):
-            return tuple()
+            return SyntaxCollection(location=self.previous_location)
 
-        self.consume(TokenID.LeftSquare),
-        parameters = [self.parse_generic_parameter()]
+        parameters = [
+            self.consume(TokenID.LeftSquare),
+            self.parse_generic_parameter()
+        ]
         while self.match(TokenID.Comma):
-            self.consume(TokenID.Comma)
+            parameters.append(self.consume(TokenID.Comma))
             parameters.append(self.parse_generic_parameter())
-        self.consume(TokenID.RightSquare)
+        parameters.append(self.consume(TokenID.RightSquare))
 
-        return tuple(parameters)
+        return SyntaxCollection(parameters)
 
     def parse_generic_parameter(self) -> GenericParameterAST:
         """
@@ -132,7 +125,7 @@ class Parser:
         tok_name = self.consume(TokenID.Name)
 
         # noinspection PyArgumentList
-        return GenericParameterAST(name=tok_name.value, location=tok_name.location)
+        return GenericParameterAST(tok_name)
 
     def parse_generic_arguments(self) -> Sequence[TypeAST]:
         """
@@ -155,7 +148,7 @@ class Parser:
         members = []
         while self.match(*self.MEMBERS_STARTS):
             members.append(self.parse_member())
-        return tuple(members)
+        return SyntaxCollection(members, location=self.previous_location)
 
     def parse_member(self) -> MemberAST:
         """
@@ -184,17 +177,17 @@ class Parser:
         class:
             'class' Name generic_parameters ':' type_members
         """
-        self.consume(TokenID.Class)
+        tok_class = self.consume(TokenID.Class)
         tok_name = self.consume(TokenID.Name)
         generic_parameters = self.parse_generic_parameters()
         members = self.parse_type_members()
 
         # noinspection PyArgumentList
         return ClassAST(
-            name=tok_name.value,
+            tok_class=tok_class,
+            tok_name=tok_name,
             generic_parameters=generic_parameters,
-            members=members,
-            location=tok_name.location
+            members=members
         )
 
     def parse_struct(self) -> StructAST:
@@ -202,17 +195,17 @@ class Parser:
         struct:
             'struct' Name generic_parameters ':' type_members
         """
-        self.consume(TokenID.Struct)
+        tok_struct = self.consume(TokenID.Struct)
         tok_name = self.consume(TokenID.Name)
         members = self.parse_type_members()
         generic_parameters = self.parse_generic_parameters()
 
         # noinspection PyArgumentList
         return StructAST(
-            name=tok_name.value,
+            tok_struct=tok_struct,
+            tok_name=tok_name,
             generic_parameters=generic_parameters,
             members=members,
-            location=tok_name.location
         )
 
     def parse_type_members(self) -> Sequence[MemberAST]:
@@ -223,15 +216,17 @@ class Parser:
         """
         self.consume(TokenID.Colon)
 
-        if self.try_consume(TokenID.Ellipsis):
-            self.consume(TokenID.NewLine)
-            return tuple()
+        if self.match(TokenID.Ellipsis):
+            tok_ellipsis = self.consume(TokenID.Ellipsis)
+            tok_newline = self.consume(TokenID.NewLine)
+            return SyntaxCollection([tok_ellipsis, tok_newline])
 
-        self.consume(TokenID.NewLine)
-        self.consume(TokenID.Indent)
-        members = self.parse_members()
-        self.consume(TokenID.Undent)
-        return members
+        members = []
+        members.append(self.consume(TokenID.NewLine))
+        members.append(self.consume(TokenID.Indent))
+        members.extend(self.parse_members().children)
+        members.append(self.consume(TokenID.Undent))
+        return SyntaxCollection(members)
 
     def parse_pass_member(self) -> PassMemberAST:
         """ pass_member: pass """
@@ -247,40 +242,46 @@ class Parser:
             Name ':' type
         """
         tok_name = self.consume(TokenID.Name)
-        self.consume(TokenID.Colon)
+        tok_colon = self.consume(TokenID.Colon)
         field_type = self.parse_type()
-        self.consume(TokenID.NewLine)
+        tok_newline = self.consume(TokenID.NewLine)
 
         # noinspection PyArgumentList
-        return FieldAST(name=tok_name.value, type=field_type, location=tok_name.location)
+        return FieldAST(tok_name=tok_name, tok_colon=tok_colon, type=field_type, tok_newline=tok_newline)
 
     def parse_function(self) -> FunctionAST:
         """
         function:
             'def' Name generic_parameters '(' parameters ')' [ '->' type ] ':' NewLine function_statement
         """
-        self.consume(TokenID.Def)
+        tok_def = self.consume(TokenID.Def)
         tok_name = self.consume(TokenID.Name)
         generic_parameters = self.parse_generic_parameters()
-        self.consume(TokenID.LeftParenthesis)
+        tok_open = self.consume(TokenID.LeftParenthesis)
         parameters = self.parse_parameters()
-        self.consume(TokenID.RightParenthesis)
-        if self.try_consume(TokenID.Then):
+        tok_close = self.consume(TokenID.RightParenthesis)
+        if self.match(TokenID.Then):
+            tok_then = self.consume(TokenID.Then)
             return_type = self.parse_type()
         else:
             # noinspection PyArgumentList
+            tok_then = None
             return_type = NamedTypeAST(name='void', location=tok_name.location)
-        self.consume(TokenID.Colon)
+        tok_colon = self.consume(TokenID.Colon)
         statement = self.parse_function_statement()
 
         # noinspection PyArgumentList
         return FunctionAST(
-            name=tok_name.value,
+            tok_def=tok_def,
+            tok_name=tok_name,
             generic_parameters=generic_parameters,
+            tok_open=tok_open,
             parameters=parameters,
+            tok_close=tok_close,
+            tok_then=tok_then,
             return_type=return_type,
-            statement=statement,
-            location=tok_name.location
+            tok_colon=tok_colon,
+            statement=statement
         )
 
     def parse_parameters(self) -> Sequence[ParameterAST]:
@@ -291,10 +292,11 @@ class Parser:
         parameters = []
         if self.match(TokenID.Name):
             parameters.append(self.parse_parameter())
-            while self.try_consume(TokenID.Comma):
+            while self.match(TokenID.Comma):
+                parameters.append(self.consume(TokenID.Comma))
                 parameters.append(self.parse_parameter())
 
-        return tuple(parameters)
+        return SyntaxCollection(parameters, location=self.previous_location)
 
     def parse_parameter(self) -> ParameterAST:
         """
@@ -303,14 +305,15 @@ class Parser:
         """
         tok_name = self.consume(TokenID.Name)
         if self.match(TokenID.Colon):
-            self.consume(TokenID.Colon)
+            tok_colon = self.consume(TokenID.Colon)
             param_type = self.parse_type()
         else:
+            tok_colon = None
             # noinspection PyArgumentList
             param_type = AutoTypeAST(location=tok_name.location)
 
         # noinspection PyArgumentList
-        return ParameterAST(name=tok_name.value, type=param_type, location=tok_name.location)
+        return ParameterAST(tok_name=tok_name, tok_colon=tok_colon, type=param_type)
 
     def parse_function_statement(self) -> Optional[StatementAST]:
         """
@@ -318,9 +321,10 @@ class Parser:
             '...' EndFile
             NewLine block_statement
         """
-        if self.try_consume(TokenID.Ellipsis):
-            self.consume(TokenID.NewLine)
-            return None
+        if self.match(TokenID.Ellipsis):
+            tok_ellipsis = self.consume(TokenID.Ellipsis)
+            tok_newline = self.consume(TokenID.NewLine)
+            return EllipsisStatementAST(tok_ellipsis=tok_ellipsis, tok_newline=tok_newline)
 
         self.consume(TokenID.NewLine)
         return self.parse_block_statement()
@@ -330,15 +334,16 @@ class Parser:
         block_statement:
             Indent statement { statement } Undent
         """
-        self.consume(TokenID.Indent)
-        statements = [self.parse_statement()]
+        statements = [
+            self.consume(TokenID.Indent),
+            self.parse_statement()
+        ]
         while self.match(*self.STATEMENT_STARTS):
             statements.append(self.parse_statement())
-        self.consume(TokenID.Undent)
-        location = statements[0].location + statements[-1].location
+        statements.append(self.consume(TokenID.Undent))
 
         # noinspection PyArgumentList
-        return BlockStatementAST(statements=tuple(statements), location=location)
+        return BlockStatementAST(statements=SyntaxCollection(statements))
 
     def parse_statement(self) -> StatementAST:
         """
@@ -380,17 +385,23 @@ class Parser:
         self.consume(TokenID.NewLine)
 
         # noinspection PyArgumentList
-        return ReturnStatementAST(value=value, location=tok_return.location)
+        return ReturnStatementAST(tok_return, value=value)
 
     def parse_else_statement(self):
         """
         else_statement:
             'else' ':' '\n' block_statement
         """
-        self.consume(TokenID.Else)
-        self.consume(TokenID.Colon)
-        self.consume(TokenID.NewLine)
-        return self.parse_block_statement()
+        tok_else = self.consume(TokenID.Else)
+        tok_colon = self.consume(TokenID.Colon)
+        tok_newline = self.consume(TokenID.NewLine)
+        statement = self.parse_block_statement()
+        return ElseStatementAST(
+            tok_else=tok_else,
+            tok_colon=tok_colon,
+            tok_newline=tok_newline,
+            statement=statement
+        )
 
     def parse_condition_statement(self, token_id: TokenID = TokenID.If) -> StatementAST:
         """
@@ -401,8 +412,8 @@ class Parser:
         """
         tok_if = self.consume(token_id)
         condition = self.parse_expression()
-        self.consume(TokenID.Colon)
-        self.consume(TokenID.NewLine)
+        tok_colon = self.consume(TokenID.Colon)
+        tok_newline = self.consume(TokenID.NewLine)
         then_statement = self.parse_block_statement()
 
         else_statement = None
@@ -413,10 +424,12 @@ class Parser:
 
         # noinspection PyArgumentList
         return ConditionStatementAST(
+            tok_if=tok_if,
             condition=condition,
+            tok_colon=tok_colon,
+            tok_newline=tok_newline,
             then_statement=then_statement,
             else_statement=else_statement,
-            location=tok_if.location
         )
 
     def parse_while_statement(self) -> StatementAST:
@@ -427,17 +440,19 @@ class Parser:
         """
         tok_while = self.consume(TokenID.While)
         condition = self.parse_expression()
-        self.consume(TokenID.Colon)
-        self.consume(TokenID.NewLine)
+        tok_colon = self.consume(TokenID.Colon)
+        tok_newline = self.consume(TokenID.NewLine)
         then_statement = self.parse_block_statement()
         else_statement = self.parse_else_statement() if self.match(TokenID.Else) else None
 
         # noinspection PyArgumentList
         return WhileStatementAST(
+            tok_while=tok_while,
             condition=condition,
+            tok_colon=tok_colon,
+            tok_newline=tok_newline,
             then_statement=then_statement,
             else_statement=else_statement,
-            location=tok_while.location
         )
 
     def parse_expression_statement(self) -> StatementAST:
@@ -463,15 +478,14 @@ class Parser:
         assign_expression
             target '=' expression
         """
-        self.consume(TokenID.Equals)
+        tok_equals = self.consume(TokenID.Equals)
         source = self.parse_expression()
-        location = target.location + source.location
 
         # noinspection PyArgumentList
         return AssignStatementAST(
             target=target,
+            tok_equals=tok_equals,
             source=source,
-            location=location
         )
 
     def parse_arguments(self) -> Sequence[ExpressionAST]:
@@ -517,7 +531,7 @@ class Parser:
                     operator=BinaryID.Add,
                     left_operand=expression,
                     right_operand=right_operand,
-                    location=tok_operator.location
+                    tok_operator=tok_operator
                 )
             elif self.match(TokenID.Minus):
                 tok_operator = self.consume(TokenID.Minus)
@@ -528,7 +542,7 @@ class Parser:
                     operator=BinaryID.Sub,
                     left_operand=expression,
                     right_operand=right_operand,
-                    location=tok_operator.location,
+                    tok_operator=tok_operator,
                 )
         return expression
 
@@ -553,7 +567,7 @@ class Parser:
                     operator=BinaryID.Mul,
                     left_operand=expression,
                     right_operand=right_operand,
-                    location=tok_operator.location,
+                    tok_operator=tok_operator,
                 )
 
             elif self.match(TokenID.Slash):
@@ -565,7 +579,7 @@ class Parser:
                     operator=BinaryID.Div,
                     left_operand=expression,
                     right_operand=right_operand,
-                    location=tok_operator.location,
+                    tok_operator=tok_operator,
                 )
 
             elif self.match(TokenID.DoubleSlash):
@@ -577,7 +591,7 @@ class Parser:
                     operator=BinaryID.DoubleDiv,
                     left_operand=expression,
                     right_operand=right_operand,
-                    location=tok_operator.location,
+                    tok_operator=tok_operator,
                 )
 
         return expression
@@ -595,21 +609,21 @@ class Parser:
             operand = self.parse_unary_expression()
 
             # noinspection PyArgumentList
-            return UnaryExpressionAST(operator=UnaryID.Neg, operand=operand, location=tok_operator.location)
+            return UnaryExpressionAST(operator=UnaryID.Neg, operand=operand, tok_operator=tok_operator)
 
         elif self.match(TokenID.Plus):
             tok_operator = self.consume(TokenID.Plus)
             operand = self.parse_unary_expression()
 
             # noinspection PyArgumentList
-            return UnaryExpressionAST(operator=UnaryID.Pos, operand=operand, location=tok_operator.location)
+            return UnaryExpressionAST(operator=UnaryID.Pos, operand=operand, tok_operator=tok_operator)
 
         elif self.match(TokenID.Tilde):
             tok_operator = self.consume(TokenID.Tilde)
             operand = self.parse_unary_expression()
 
             # noinspection PyArgumentList
-            return UnaryExpressionAST(operator=UnaryID.Inv, operand=operand, location=tok_operator.location)
+            return UnaryExpressionAST(operator=UnaryID.Inv, operand=operand, tok_operator=tok_operator)
 
         return self.parse_power_expression()
 
@@ -628,7 +642,7 @@ class Parser:
                 operator=BinaryID.Pow,
                 left_operand=expression,
                 right_operand=unary_expression,
-                location=tok_operator.location
+                tok_operator=tok_operator
             )
         return expression
 
@@ -668,7 +682,7 @@ class Parser:
         tok_number = self.consume(TokenID.Number)
 
         # noinspection PyArgumentList
-        return IntegerExpressionAST(value=int(tok_number.value), location=tok_number.location)
+        return IntegerExpressionAST(tok_number=tok_number)
 
     def parse_name_expression(self) -> ExpressionAST:
         """
@@ -678,45 +692,42 @@ class Parser:
         tok_name = self.consume(TokenID.Name)
 
         # noinspection PyArgumentList
-        return NamedExpressionAST(name=tok_name.value, location=tok_name.location)
+        return NamedExpressionAST(tok_name=tok_name)
 
     def parse_call_expression(self, value: ExpressionAST) -> ExpressionAST:
         """
         call_expression
             atom '(' arguments ')'
         """
-        self.consume(TokenID.LeftParenthesis)
+        tok_open = self.consume(TokenID.LeftParenthesis)
         arguments = self.parse_arguments()
         tok_close = self.consume(TokenID.RightParenthesis)
-        location = value.location + tok_close.location
 
         # noinspection PyArgumentList
-        return CallExpressionAST(value=value, arguments=arguments, location=location)
+        return CallExpressionAST(value=value, tok_open=tok_open, arguments=arguments, tok_close=tok_close)
 
     def parse_subscribe_expression(self, value: ExpressionAST) -> ExpressionAST:
         """
         subscribe_expression
             atom '[' arguments ']'
         """
-        self.consume(TokenID.LeftSquare)
+        tok_open = self.consume(TokenID.LeftSquare)
         arguments = self.parse_arguments()
         tok_close = self.consume(TokenID.RightSquare)
-        location = value.location + tok_close.location
 
         # noinspection PyArgumentList
-        return SubscribeExpressionAST(value=value, arguments=arguments, location=location)
+        return SubscribeExpressionAST(value=value, tok_open=tok_open, arguments=arguments, tok_close=tok_close)
 
     def parse_attribute_expression(self, value: ExpressionAST) -> ExpressionAST:
         """
         attribute_expression:
             atom '.' Name
         """
-        self.consume(TokenID.Dot)
+        tok_dot = self.consume(TokenID.Dot)
         tok_name = self.consume(TokenID.Name)
-        location = value.location + tok_name.location
 
         # noinspection PyArgumentList
-        return AttributeAST(value=value, name=tok_name.value, location=location)
+        return AttributeAST(value=value, tok_dot=tok_dot, tok_name=tok_name)
 
     def parse_parenthesis_expression(self) -> ExpressionAST:
         """

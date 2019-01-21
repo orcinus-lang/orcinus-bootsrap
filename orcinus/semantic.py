@@ -208,14 +208,14 @@ class SemanticModel:
         self.declare_symbol(self.tree, None)
         self.emit_functions(self.tree)
 
-    def annotate_recursive_scope(self, node: NodeAST, parent=None):
+    def annotate_recursive_scope(self, node: SyntaxNode, parent=None):
         scope = self.scopes.get(node) or self.annotate_scope(node, parent)
         self.scopes[node] = scope
         for child in node:
             self.annotate_recursive_scope(child, scope)
 
     @multimethod
-    def annotate_scope(self, _: NodeAST, parent: LexicalScope) -> LexicalScope:
+    def annotate_scope(self, _: SyntaxNode, parent: LexicalScope) -> LexicalScope:
         return parent
 
     @multimethod
@@ -238,7 +238,7 @@ class SemanticModel:
     def annotate_scope(self, _: StructAST, parent: LexicalScope) -> LexicalScope:
         return LexicalScope(parent)
 
-    def declare_symbol(self, node: NodeAST, scope: LexicalScope = None, parent: ContainerSymbol = None):
+    def declare_symbol(self, node: SyntaxNode, scope: LexicalScope = None, parent: ContainerSymbol = None):
         symbol = self.annotate_symbol(node, parent)
         if not symbol:
             return None
@@ -306,7 +306,7 @@ class SemanticModel:
         return parameters
 
     @multimethod
-    def annotate_symbol(self, node: NodeAST, parent: ContainerSymbol) -> Symbol:
+    def annotate_symbol(self, node: SyntaxNode, parent: ContainerSymbol) -> Symbol:
         raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented member declaration")
 
     # noinspection PyUnusedLocal
@@ -377,7 +377,7 @@ class SemanticModel:
 
     def emit_function(self, node: FunctionAST):
         func = self.symbols[node]
-        if node.statement:
+        if not isinstance(node.statement, EllipsisStatementAST):
             with self.with_function(func):
                 func.statement = self.emit_statement(node.statement)
 
@@ -485,6 +485,10 @@ class SemanticModel:
     def emit_statement(self, node: BlockStatementAST) -> Statement:
         statements = [self.emit_statement(statement) for statement in node.statements]
         return BlockStatement(statements, node.location)
+
+    @multimethod
+    def emit_statement(self, node: ElseStatementAST) -> Statement:
+        return self.emit_statement(node.statement)
 
     @multimethod
     def emit_statement(self, node: PassStatementAST) -> Statement:

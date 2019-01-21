@@ -10,7 +10,7 @@ from typing import Iterator
 
 from orcinus.core.diagnostics import DiagnosticSeverity, Diagnostic, DiagnosticManager
 from orcinus.core.locations import Location
-from orcinus.syntax import Token, TokenID
+from orcinus.syntax import SyntaxToken, TokenID
 
 
 class Scanner:
@@ -90,7 +90,7 @@ class Scanner:
     # noinspection PyArgumentList
     regex_pattern, regex_groups = __make_regex(TOKENS)
 
-    def tokenize(self) -> Iterator[Token]:
+    def tokenize(self) -> Iterator[SyntaxToken]:
         indentions = collections.deque([0])
         is_new = True  # new line
         is_empty = True  # empty line
@@ -118,7 +118,7 @@ class Scanner:
             elif token.id == TokenID.EndFile:
                 location = Location(token.location.filename, token.location.end, token.location.end)
                 while indentions[-1] > 0:
-                    yield Token(TokenID.Undent, '', location)
+                    yield SyntaxToken(TokenID.Undent, '', location)
                     indentions.pop()
 
                 yield token
@@ -137,11 +137,11 @@ class Scanner:
                     location = Location(token.location.filename, token.location.begin, token.location.begin)
 
                 if indentions[-1] < indent:
-                    yield Token(TokenID.Indent, '', location)
+                    yield SyntaxToken(TokenID.Indent, '', location)
                     indentions.append(indent)
 
                 while indentions[-1] > indent:
-                    yield Token(TokenID.Undent, '', location)
+                    yield SyntaxToken(TokenID.Undent, '', location)
                     indentions.pop()
 
             is_new = False
@@ -154,10 +154,10 @@ class Scanner:
 
             yield token
 
-    def tokenize_all(self) -> Iterator[Token]:
+    def tokenize_all(self) -> Iterator[SyntaxToken]:
         while self.index < self.length:
             yield self.__match()
-        yield Token(TokenID.EndFile, "", self.location)
+        yield SyntaxToken(TokenID.EndFile, "", self.location)
 
     def __match(self):
         self.location.columns(1)
@@ -173,7 +173,7 @@ class Scanner:
         value = match.group(group_name)
         self.index += len(value)
         location = self.__consume_location(value)
-        return Token(symbol_id, value, location)
+        return SyntaxToken(symbol_id, value, location)
 
     def __consume_location(self, value):
         for c in value[:-1]:

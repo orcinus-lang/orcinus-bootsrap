@@ -10,7 +10,7 @@ class cached_property(object):
         self.func = func
 
     def __get__(self, instance, cls=None):
-        if instance:
+        if instance is not None:
             result = instance.__dict__[self.func.__name__] = self.func(instance)
             return result
         return None  # ABC

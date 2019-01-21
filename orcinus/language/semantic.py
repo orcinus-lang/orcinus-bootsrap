@@ -4,23 +4,16 @@
 # of the MIT license.  See the LICENSE file for details.
 from __future__ import annotations
 
-import abc
-import collections
 import heapq
-import itertools
 import logging
-import os
 from contextlib import contextmanager
-from io import StringIO
-from typing import cast, Tuple
+from typing import Tuple
 
 from multimethod import multimethod
 
 from orcinus.core.diagnostics import DiagnosticSeverity, Diagnostic, DiagnosticManager
-from orcinus.core.locations import Location
 from orcinus.exceptions import OrcinusError
-from orcinus.parser import Parser
-from orcinus.syntax import *
+from orcinus.language.syntax import *
 from orcinus.utils import cached_property
 
 logger = logging.getLogger('orcinus')
@@ -90,36 +83,18 @@ class LexicalScope:
 
 
 class SemanticContext:
-    def __init__(self, paths=None, *, diagnostics: DiagnosticManager = None):
+    def __init__(self, workspace: Workspace, *, diagnostics: DiagnosticManager = None):
         self.diagnostics = diagnostics if diagnostics is not None else DiagnosticManager()
-        if not paths:
-            paths = [
-                os.path.join(os.path.dirname(os.path.dirname(__file__)), 'stdlib'),
-                os.getcwd()
-            ]
-        self.paths = paths
-        self.modules = {}
+        self.workspace = workspace
+        self.models = {}
 
-    @staticmethod
-    def convert_module_name(filename, path):
-        fullname = os.path.abspath(filename)
-        if not fullname.startswith(path):
-            raise OrcinusError(f"Not found file `{filename}` in library path `{path}`")
-
-        module_name = fullname[len(path):]
-        module_name, _ = os.path.splitext(module_name)
-        module_name = module_name.strip(os.path.sep)
-        module_name = module_name.replace(os.path.sep, '.')
-        return module_name
-
-    @staticmethod
-    def convert_filename(module_name, path):
-        filename = module_name.replace('.', os.path.sep) + '.orx'
-        return os.path.join(path, filename)
+    @cached_property
+    def builtins_model(self) -> SemanticModel:
+        return self.load('__builtins__')
 
     @cached_property
     def builtins_module(self) -> Module:
-        return self.load('__builtins__')
+        return self.builtins_model.module
 
     @cached_property
     def boolean_type(self) -> BooleanType:
@@ -133,50 +108,19 @@ class SemanticContext:
     def void_type(self) -> VoidType:
         return cast(VoidType, self.builtins_module.scope.resolve('void'))
 
-    def get_module_name(self, filename):
-        fullname = os.path.abspath(filename)
-        for path in self.paths:
-            if fullname.startswith(path):
-                return self.convert_module_name(fullname, path)
-
-        raise OrcinusError(f"Not found file `{filename}` in library paths")
-
-    def open(self, filename, *, content=None) -> Module:
+    def open(self, document: Document) -> SemanticModel:
         """ Open module from file """
-        module_name = self.get_module_name(filename)
+        if document.uri in self.models:
+            return self.models[document.uri]
 
-        if content:
-            with StringIO(content) as stream:
-                return self.__open_source(filename, module_name, stream)
-        else:
-            with open(filename, 'r', encoding='utf8') as stream:
-                return self.__open_source(filename, module_name, stream)
+        model = SemanticModel(self, document.name, document.tree)
+        self.models[document.uri] = model
+        model.analyze()
+        return model
 
-    def load(self, module_name) -> Module:
-        for path in self.paths:
-            filename = self.convert_filename(module_name, path)
-            try:
-                with open(filename, 'r', encoding='utf8') as stream:
-                    return self.__open_source(filename, module_name, stream)
-            except IOError:
-                logger.info(f"Not found module `{module_name}` in file `{filename}`")
-                pass  # Continue
-
-        raise OrcinusError(f'Not found module {module_name}')
-
-    def __open_source(self, filename, module_name, stream) -> Module:
-        logger.info(f"Open `{module_name}` from file `{filename}`")
-
-        if module_name in self.modules:
-            model = self.modules[module_name]
-        else:
-            parser = Parser(filename, stream, diagnostics=self.diagnostics)
-            tree = parser.parse()
-
-            model = SemanticModel(self, module_name, tree)
-            self.modules[module_name] = model
-            model.analyze()
-        return model.module
+    def load(self, module_name) -> SemanticModel:
+        document = self.workspace.load_document(module_name)
+        return self.open(document)
 
 
 class SemanticModel:

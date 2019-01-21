@@ -10,7 +10,7 @@ from typing import Iterator
 
 from orcinus.core.diagnostics import DiagnosticSeverity, Diagnostic, DiagnosticManager
 from orcinus.core.locations import Location
-from orcinus.syntax import SyntaxToken, TokenID
+from orcinus.language.syntax import SyntaxToken, TokenID
 
 
 class Scanner:

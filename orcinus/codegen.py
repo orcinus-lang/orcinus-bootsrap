@@ -4,14 +4,13 @@
 # of the MIT license.  See the LICENSE file for details.
 from __future__ import annotations
 
-from typing import Sequence, cast, Mapping
+from typing import Sequence, Mapping
 
 from llvmlite import binding
 from llvmlite import ir
 from multidict import MultiDict
-from multimethod import multimethod
 
-from orcinus.semantic import *
+from orcinus.language.semantic import *
 from orcinus.utils import cached_property
 
 

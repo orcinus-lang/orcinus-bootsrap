@@ -5,9 +5,9 @@
 from __future__ import annotations
 
 from orcinus.core.diagnostics import DiagnosticManager
-from orcinus.parser import Parser
-from orcinus.semantic import SemanticModel, SemanticContext
-from orcinus.syntax import ModuleAST
+from orcinus.language.parser import Parser
+from orcinus.language.semantic import SemanticModel, SemanticContext
+from orcinus.language.syntax import ModuleAST
 
 
 class Document:

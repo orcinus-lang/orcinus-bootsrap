@@ -5,8 +5,8 @@
 from __future__ import annotations
 
 from orcinus.core.diagnostics import DiagnosticSeverity, Diagnostic, DiagnosticManager
-from orcinus.scanner import Scanner
-from orcinus.syntax import *
+from orcinus.language.scanner import Scanner
+from orcinus.language.syntax import *
 
 
 class Parser:

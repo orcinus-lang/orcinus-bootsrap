@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import functools
 import logging
+import os
 import sys
 from typing import Sequence
 
@@ -16,8 +17,8 @@ from llvmlite import binding
 from orcinus import __version__ as version
 from orcinus.codegen import ModuleCodegen
 from orcinus.core.diagnostics import Diagnostic, DiagnosticSeverity, DiagnosticManager
-from orcinus.semantic import SemanticContext
 from orcinus.server.server import LanguageTCPServer
+from orcinus.workspace import Workspace
 
 logger = logging.getLogger('orcinus')
 
@@ -125,12 +126,13 @@ def build(filenames: Sequence[str]):
     binding.initialize_native_asmparser()
     binding.initialize_native_asmprinter()
 
-    # initialize semantic context
-    context = SemanticContext()
+    # initialize workspace context
+    workspace = Workspace(paths=[os.getcwd()])
     for filename in filenames:
-        module = context.open(filename)
-        generator = ModuleCodegen(context, module.name)
-        generator.emit(module)
+        document = workspace.get_or_create_document(filename)
+
+        generator = ModuleCodegen(document.model.context, document.name)
+        generator.emit(document.module)
         print(generator)
 
 

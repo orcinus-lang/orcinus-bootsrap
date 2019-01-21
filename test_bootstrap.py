@@ -11,10 +11,9 @@ import warnings as pywarnings
 import pytest
 import logging
 
-PYTHON_EXECUTABLE = sys.executable
 OPT_EXECUTABLE = 'opt-6.0'
 LLI_EXECUTABLE = 'lli-6.0'
-BOOTSTRAP_SCRIPT = 'bootstrap.py'
+BOOTSTRAP_SCRIPT = 'orcinus'
 
 
 def find_scripts(path):
@@ -68,7 +67,7 @@ def get_build_options():
 
 def compile_and_execute(filename, *, name, opt_level, arguments, input=None):
     # orcinus - generate LLVM IR
-    code, assembly, stderr = execute([PYTHON_EXECUTABLE, BOOTSTRAP_SCRIPT, filename], is_binary=True)
+    code, assembly, stderr = execute([BOOTSTRAP_SCRIPT, 'build', filename], is_binary=True)
     if code:
         return False, -code, assembly, stderr.decode('utf-8').rstrip()
 

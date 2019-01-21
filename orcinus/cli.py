@@ -17,6 +17,7 @@ from orcinus import __version__ as version
 from orcinus.codegen import ModuleCodegen
 from orcinus.core.diagnostics import Diagnostic, DiagnosticSeverity, DiagnosticManager
 from orcinus.semantic import SemanticContext
+from orcinus.server.server import LanguageTCPServer
 
 logger = logging.getLogger('orcinus')
 
@@ -133,6 +134,11 @@ def build(filenames: Sequence[str]):
         print(generator)
 
 
+def start_server(hostname, port):
+    server = LanguageTCPServer()
+    server.listen(hostname, port)
+
+
 def main():
     # initialize default logging
     initialize_logging()
@@ -152,6 +158,14 @@ def main():
     build_cmd.add_argument('--pdb', dest=KEY_PDB, action='store_true', help="post-mortem mode")
     build_cmd.add_argument('-l', '--level', dest=KEY_LEVEL, choices=LEVELS, default=DEFAULT_LEVEL)
     build_cmd.add_argument(dest=KEY_ACTION, help=argparse.SUPPRESS, action='store_const', const=build)
+
+    # add command: Run LSP server
+    server_cmd = subparsers.add_parser('server', help='Run server language server protocol')
+    server_cmd.add_argument('--pdb', dest=KEY_PDB, action='store_true', help="post-mortem mode")
+    server_cmd.add_argument('-l', '--level', dest=KEY_LEVEL, choices=LEVELS, default=DEFAULT_LEVEL)
+    server_cmd.add_argument('--hostname', type=str, default='0.0.0.0')
+    server_cmd.add_argument('--port', type=int, default=55290)
+    server_cmd.add_argument(dest=KEY_ACTION, help=argparse.SUPPRESS, action='store_const', const=start_server)
 
     # parse arguments
     kwargs = parser.parse_args().__dict__

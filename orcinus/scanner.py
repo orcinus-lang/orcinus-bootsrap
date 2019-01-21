@@ -8,7 +8,7 @@ import collections
 import re
 from typing import Iterator
 
-from orcinus.core.diagnostics import DiagnosticSeverity, Diagnostic
+from orcinus.core.diagnostics import DiagnosticSeverity, Diagnostic, DiagnosticManager
 from orcinus.core.locations import Location
 from orcinus.syntax import Token, TokenID
 
@@ -68,7 +68,8 @@ class Scanner:
     OPEN_BRACKETS = (TokenID.LeftParenthesis,)
     CLOSE_BRACKETS = (TokenID.RightParenthesis,)
 
-    def __init__(self, filename, stream):
+    def __init__(self, filename, stream, *, diagnostics: DiagnosticManager = None):
+        self.diagnostics = diagnostics if diagnostics is not None else DiagnosticManager()
         self.index = 0
         self.buffer = stream.read()
         self.length = len(self.buffer)

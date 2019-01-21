@@ -11,11 +11,12 @@ import itertools
 import logging
 import os
 from contextlib import contextmanager
+from io import StringIO
 from typing import cast, Tuple
 
 from multimethod import multimethod
 
-from orcinus.core.diagnostics import DiagnosticSeverity, Diagnostic
+from orcinus.core.diagnostics import DiagnosticSeverity, Diagnostic, DiagnosticManager
 from orcinus.core.locations import Location
 from orcinus.exceptions import OrcinusError
 from orcinus.parser import Parser
@@ -89,7 +90,8 @@ class LexicalScope:
 
 
 class SemanticContext:
-    def __init__(self, paths=None):
+    def __init__(self, paths=None, *, diagnostics: DiagnosticManager = None):
+        self.diagnostics = diagnostics if diagnostics is not None else DiagnosticManager()
         if not paths:
             paths = [
                 os.path.join(os.path.dirname(os.path.dirname(__file__)), 'stdlib'),
@@ -139,12 +141,16 @@ class SemanticContext:
 
         raise OrcinusError(f"Not found file `{filename}` in library paths")
 
-    def open(self, filename) -> Module:
+    def open(self, filename, *, content=None) -> Module:
         """ Open module from file """
         module_name = self.get_module_name(filename)
 
-        with open(filename, 'r', encoding='utf8') as stream:
-            return self.__open_source(filename, module_name, stream)
+        if content:
+            with StringIO(content) as stream:
+                return self.__open_source(filename, module_name, stream)
+        else:
+            with open(filename, 'r', encoding='utf8') as stream:
+                return self.__open_source(filename, module_name, stream)
 
     def load(self, module_name) -> Module:
         for path in self.paths:
@@ -164,7 +170,7 @@ class SemanticContext:
         if module_name in self.modules:
             model = self.modules[module_name]
         else:
-            parser = Parser(filename, stream)
+            parser = Parser(filename, stream, diagnostics=self.diagnostics)
             tree = parser.parse()
 
             model = SemanticModel(self, module_name, tree)

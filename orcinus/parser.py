@@ -4,7 +4,7 @@
 # of the MIT license.  See the LICENSE file for details.
 from __future__ import annotations
 
-from orcinus.core.diagnostics import DiagnosticSeverity, Diagnostic
+from orcinus.core.diagnostics import DiagnosticSeverity, Diagnostic, DiagnosticManager
 from orcinus.scanner import Scanner
 from orcinus.syntax import *
 
@@ -16,8 +16,9 @@ class Parser:
     )
     STATEMENT_STARTS = EXPRESSION_STARTS + (TokenID.Pass, TokenID.Return, TokenID.While, TokenID.If)
 
-    def __init__(self, filename, stream):
-        self.tokens = list(Scanner(filename, stream))
+    def __init__(self, filename, stream, *, diagnostics: DiagnosticManager = None):
+        self.diagnostics = diagnostics if diagnostics is not None else DiagnosticManager()
+        self.tokens = list(Scanner(filename, stream, diagnostics=diagnostics))
         self.index = 0
 
     @property

@@ -27,6 +27,7 @@ setup(
         'multidict==4.5.2',
         'multimethod==1.0',
         'colorlog==3.1.4',
+        'json-rpc == 1.11.1',
         'pytest==3.6.1',
     ],
     include_package_data=True,

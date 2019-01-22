@@ -1,0 +1,5 @@
+# EXIT: 1
+from system import exit
+
+def main():
+    exit(1)

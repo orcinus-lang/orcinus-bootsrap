@@ -31,7 +31,6 @@ def load_source_content(location: Location, before=2, after=2):
     except IOError:
         return []
     else:
-        results.append([idx + 2, ""])
         return results
 
 

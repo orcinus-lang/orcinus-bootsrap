@@ -49,8 +49,8 @@ def log_diagnostics(diagnostics: DiagnosticManager):
 
 def exit_diagnostics(diagnostics: DiagnosticManager):
     if diagnostics.has_error:
+        log_diagnostics(diagnostics)
         sys.exit(1)
-    sys.exit(0)
 
 
 def initialize_logging():
@@ -130,10 +130,13 @@ def build(filenames: Sequence[str]):
     workspace = Workspace(paths=[os.getcwd()])
     for filename in filenames:
         document = workspace.get_or_create_document(filename)
+        module = document.module
+        exit_diagnostics(document.diagnostics)
 
-        generator = ModuleCodegen(document.model.context, document.name)
-        generator.emit(document.module)
-        print(generator)
+        if module:
+            generator = ModuleCodegen(document.model.context, document.name)
+            generator.emit(module)
+            print(generator)
 
 
 def start_server(hostname, port):

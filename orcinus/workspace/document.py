@@ -93,7 +93,7 @@ class Document:
     def module(self) -> Module:
         """ Return semantic module for this document """
         if not self.__module:
-            self.__module = self.model.module
+            self.__module = self.model.module if self.model else None
         return self.__module
 
     def invalidate(self):

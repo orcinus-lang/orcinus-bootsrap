@@ -217,12 +217,12 @@ class SyntaxNode(SyntaxSymbol):
     def children(self) -> Sequence[SyntaxSymbol]:
         raise NotImplementedError
 
-    @cached_property
+    @property
     def nodes(self) -> Sequence[SyntaxNode]:
         """ Returns children syntax nodes """
         return cast(Sequence[SyntaxNode], list(filter(lambda s: isinstance(s, SyntaxNode), self.children)))
 
-    @cached_property
+    @property
     def tokens(self) -> Sequence[SyntaxToken]:
         """ Returns children syntax tokens """
         return cast(Sequence[SyntaxToken], list(filter(lambda s: isinstance(s, SyntaxToken), self.children)))
@@ -284,7 +284,7 @@ class SyntaxCollection(SyntaxNode, collections.abc.Sequence):
     def location(self) -> Location:
         if self.__location:
             return self.__location
-        return self.__children[0].begin_location + self.__children[1].end_location
+        return self.__children[0].begin_location + self.__children[-1].end_location
 
     @property
     def children(self) -> Sequence[SyntaxSymbol]:
@@ -302,6 +302,7 @@ class SyntaxCollection(SyntaxNode, collections.abc.Sequence):
 
 @dataclass(unsafe_hash=True, frozen=True)
 class ModuleAST(SyntaxNode):
+    imports: Sequence[ImportAST]
     members: Sequence[MemberAST]
     tok_eof: SyntaxToken
 
@@ -313,6 +314,79 @@ class ModuleAST(SyntaxNode):
     def location(self) -> Location:
         begin = cast(SyntaxCollection, self.members).begin_location
         return begin + self.tok_eof.end_location
+
+
+@dataclass(unsafe_hash=True, frozen=True)
+class QualifiedNameAST(SyntaxNode):
+    names: Sequence[SyntaxToken]
+
+    @cached_property
+    def full_name(self):
+        return ''.join(token.value for token in self.tokens)
+
+    @property
+    def location(self) -> Location:
+        return cast(SyntaxCollection, self.names).location
+
+    @property
+    def children(self) -> Sequence[SyntaxSymbol]:
+        return cast(SyntaxCollection, self.names).children
+
+
+@dataclass(unsafe_hash=True, frozen=True)
+class AliasAST(SyntaxNode):
+    qualified_name: QualifiedNameAST
+    tok_as: Optional[SyntaxToken]
+    tok_alias: SyntaxToken
+
+    @property
+    def name(self) -> str:
+        return self.qualified_name.full_name
+
+    @property
+    def alias(self) -> Optional[str]:
+        return self.tok_alias.value if self.tok_alias else None
+
+    @property
+    def location(self) -> Location:
+        return self.qualified_name.location
+
+    @property
+    def children(self) -> Sequence[SyntaxSymbol]:
+        return self._cleanup(self.qualified_name, self.tok_as, self.tok_alias)
+
+
+@dataclass(unsafe_hash=True, frozen=True)
+class ImportAST(SyntaxNode):
+    tok_import: SyntaxToken
+    aliases: Sequence[AliasAST]
+    tok_newline: SyntaxToken
+
+    @property
+    def location(self) -> Location:
+        return self.tok_import.location
+
+    @property
+    def children(self) -> Sequence[SyntaxSymbol]:
+        return [self.tok_import, self.aliases, self.tok_newline]
+
+
+@dataclass(unsafe_hash=True, frozen=True)
+class ImportFromAST(ImportAST):
+    tok_from: SyntaxToken
+    qualified_name: QualifiedNameAST
+
+    @property
+    def module(self):
+        return self.qualified_name.full_name
+
+    @property
+    def location(self) -> Location:
+        return self.tok_from.location
+
+    @property
+    def children(self) -> Sequence[SyntaxSymbol]:
+        return [self.tok_from, self.qualified_name, self.tok_import, self.aliases]
 
 
 @dataclass(unsafe_hash=True, frozen=True)
@@ -631,6 +705,15 @@ class WhileStatementAST(StatementAST):
 @dataclass(unsafe_hash=True, frozen=True)
 class ExpressionStatementAST(StatementAST):
     value: ExpressionAST
+    tok_newline: SyntaxToken
+
+    @property
+    def location(self) -> Location:
+        return self.value.location
+
+    @property
+    def children(self) -> Sequence[SyntaxSymbol]:
+        return [self.value, self.tok_newline]
 
 
 @dataclass(unsafe_hash=True, frozen=True)

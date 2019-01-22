@@ -10,6 +10,7 @@ from orcinus.language.syntax import *
 
 
 class Parser:
+    IMPORTS_STARTS = (TokenID.Import, TokenID.From)
     MEMBERS_STARTS = (TokenID.Pass, TokenID.Def, TokenID.Class, TokenID.Struct, TokenID.Name)
     EXPRESSION_STARTS = (
         TokenID.Number, TokenID.Name, TokenID.LeftParenthesis, TokenID.Plus, TokenID.Minus, TokenID.Tilde
@@ -55,11 +56,11 @@ class Parser:
         # generate exception message
         existed_name = self.current_token.id.name
         if len(indexes) > 1:
-            required_names = ', '.join(f'`{x.name}`' for x in indexes)
-            message = f"Required one of {required_names}, but got `{existed_name}`"
+            required_names = ', '.join(f'‘{x.name}’' for x in indexes)
+            message = f"Expected one of {required_names}, but got ‘{existed_name}’"
         else:
             required_name = indexes[0].name
-            message = f"Required `{required_name}`, but got `{existed_name}`"
+            message = f"Expected ‘{required_name}’, but got ‘{existed_name}’"
         raise Diagnostic(self.current_token.location, DiagnosticSeverity.Error, message)
 
     def parse(self) -> ModuleAST:
@@ -69,11 +70,12 @@ class Parser:
         module:
             members EndFile
         """
+        imports = self.parse_imports()
         members = self.parse_members()
         tok_eof = self.consume(TokenID.EndFile)
 
         # noinspection PyArgumentList
-        return ModuleAST(members=members, tok_eof=tok_eof)
+        return ModuleAST(imports=imports, members=members, tok_eof=tok_eof)
 
     def parse_type(self) -> TypeAST:
         """
@@ -139,6 +141,84 @@ class Parser:
             arguments.append(self.parse_type())
         self.consume(TokenID.RightSquare)
         return tuple(arguments)
+
+    def parse_imports(self) -> Sequence[ImportAST]:
+        """
+        imports:
+            { import }
+        """
+        imports = []
+        while self.match(*self.IMPORTS_STARTS):
+            imports.append(self.parse_import())
+        return SyntaxCollection(imports, location=self.previous_location)
+
+    def parse_import(self) -> ImportAST:
+        """
+        import:
+            'import' aliases
+            'from' qualified_name 'import' aliases
+        """
+        if self.match(TokenID.From):
+            tok_from = self.consume(TokenID.From)
+            qualified_name = self.parse_qualified_name()
+            tok_import = self.consume(TokenID.Import)
+            aliases = self.parse_aliases()
+            tok_newline = self.consume(TokenID.NewLine)
+
+            # noinspection PyArgumentList
+            return ImportFromAST(
+                tok_from=tok_from,
+                tok_import=tok_import,
+                qualified_name=qualified_name,
+                aliases=aliases,
+                tok_newline=tok_newline
+            )
+        elif self.match(TokenID.Import):
+            tok_import = self.consume(TokenID.Import)
+            aliases = self.parse_aliases()
+            tok_newline = self.consume(TokenID.NewLine)
+
+            return ImportAST(tok_import=tok_import, aliases=aliases, tok_newline=tok_newline)
+
+        self.match(*self.IMPORTS_STARTS)
+
+    def parse_qualified_name(self) -> QualifiedNameAST:
+        """
+        qualified_name:
+            Name { '.' Name }
+        """
+        names = [self.consume(TokenID.Name)]
+        while self.match(TokenID.Dot):
+            names.append(self.consume(TokenID.Dot))
+            names.append(self.consume(TokenID.Name))
+        return QualifiedNameAST(names=SyntaxCollection(names))
+
+    def parse_aliases(self) -> Sequence[AliasAST]:
+        """
+        aliases:
+            alias { ',' alias }
+        """
+        aliases = [self.parse_alias()]
+        while self.match(TokenID.Comma):
+            aliases.append(self.consume(TokenID.Comma))
+            aliases.append(self.parse_alias())
+
+        return SyntaxCollection(aliases)
+
+    def parse_alias(self):
+        """
+        alias:
+            qualified_name [ 'as' Name ]
+        """
+        qualified_name = self.parse_qualified_name()
+        if self.match(TokenID.As):
+            tok_as = self.consume(TokenID.As)
+            tok_alias = self.consume(TokenID.Name)
+        else:
+            tok_as = None
+            tok_alias = None
+
+        return AliasAST(qualified_name=qualified_name, tok_as=tok_as, tok_alias=tok_alias)
 
     def parse_members(self) -> Sequence[MemberAST]:
         """
@@ -467,10 +547,10 @@ class Parser:
         if self.match(TokenID.Equals):
             statement = self.parse_assign_statement(expression)
 
-        self.consume(TokenID.NewLine)
+        tok_newline = self.consume(TokenID.NewLine)
         if not statement:
             # noinspection PyArgumentList
-            statement = ExpressionStatementAST(value=expression, location=expression.location)
+            statement = ExpressionStatementAST(value=expression, tok_newline=tok_newline)
         return statement
 
     def parse_assign_statement(self, target: ExpressionAST):

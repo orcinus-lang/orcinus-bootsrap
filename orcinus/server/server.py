@@ -196,7 +196,7 @@ class LanguageTCPClient:
 
     def text_document_close(self, textDocument):
         logger.info(f"Close document: {textDocument['uri']}")
-        self.workspace.remove_document(textDocument['uri'])
+        self.workspace.unload_document(textDocument['uri'])
 
     def text_document_completion(self, textDocument, position, context=None):
         document = self.workspace.get_or_create_document(textDocument['uri'])

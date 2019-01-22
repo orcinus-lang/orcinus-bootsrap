@@ -113,7 +113,7 @@ class SemanticContext:
         if document.uri in self.models:
             return self.models[document.uri]
 
-        model = SemanticModel(self, document.name, document.tree)
+        model = SemanticModel(self, document.name, document.tree, diagnostics=self.diagnostics)
         self.models[document.uri] = model
         model.analyze()
         return model
@@ -124,7 +124,9 @@ class SemanticContext:
 
 
 class SemanticModel:
-    def __init__(self, context: SemanticContext, module_name: str, tree: ModuleAST):
+    def __init__(self, context: SemanticContext, module_name: str, tree: ModuleAST, *,
+                 diagnostics: DiagnosticManager = None):
+        self.diagnostics = diagnostics if diagnostics is not None else DiagnosticManager()
         self.context = context
         self.module_name = module_name
         self.tree = tree
@@ -149,6 +151,7 @@ class SemanticModel:
 
     def analyze(self):
         self.annotate_recursive_scope(self.tree)
+        self.import_symbols(self.tree)
         self.declare_symbol(self.tree, None)
         self.emit_functions(self.tree)
 
@@ -181,6 +184,27 @@ class SemanticModel:
     @multimethod
     def annotate_scope(self, _: StructAST, parent: LexicalScope) -> LexicalScope:
         return LexicalScope(parent)
+
+    def import_symbols(self, node: ModuleAST):
+        """ Import symbols from imported scopes """
+
+        # TODO: Import builtin module
+        scope: LexicalScope = self.scopes[node]
+
+        for child in node.imports:
+            if isinstance(child, ImportFromAST):
+                imported_model = self.context.load(child.module)
+                module = imported_model.module
+
+                for alias in child.aliases:
+                    symbol = module.scope.resolve(alias.name)
+                    if not symbol:
+                        self.diagnostics.error(
+                            alias.location, f"Not found symbol ‘{alias.name}’ in module ‘{child.module}’")
+                    scope.append(symbol, name=alias.alias or alias.name)
+
+            else:
+                self.diagnostics.error(node.location, "Not implemented symbol importing")
 
     def declare_symbol(self, node: SyntaxNode, scope: LexicalScope = None, parent: ContainerSymbol = None):
         symbol = self.annotate_symbol(node, parent)
@@ -266,12 +290,21 @@ class SemanticModel:
     def annotate_symbol(self, node: FunctionAST, parent: ContainerSymbol) -> Function:
         scope = self.scopes[node]
         generic_parameters = self.annotate_generics(scope, node.generic_parameters)
+
+        # if function is method of struct/class/interface and first arguments type is auto, then it type can
+        # be inferred to owner type
         if isinstance(parent, Type) and node.parameters and isinstance(node.parameters[0].type, AutoTypeAST):
             parameters = [parent]
             parameters.extend(self.resolve_type(param.type) for param in node.parameters[1:])
         else:
             parameters = [self.resolve_type(param.type) for param in node.parameters]
-        return_type = self.resolve_type(node.return_type)
+
+        # if return type of function is auto it can be inferred to void
+        if isinstance(node.return_type, AutoTypeAST):
+            return_type = self.context.void_type
+        else:
+            return_type = self.resolve_type(node.return_type)
+
         func_type = FunctionType(self.module, parameters, return_type, node.location)
         func = Function(parent, node.name, func_type, node.location, generic_parameters=generic_parameters)
 
@@ -304,7 +337,7 @@ class SemanticModel:
 
     @multimethod
     def annotate_symbol(self, node: GenericParameterAST, parent: ContainerSymbol) -> Symbol:
-        return GenericType(node.name, node.location)
+        return GenericType(parent, node.name, node.location)
 
     @multimethod
     def annotate_symbol(self, node: FieldAST, parent: ContainerSymbol) -> Field:
@@ -1153,6 +1186,7 @@ class Module(NamedSymbol, ContainerSymbol):
     def __init__(self, context: SemanticContext, name, location: Location):
         super(Module, self).__init__()
 
+        self.__context = context
         self.__name = name
         self.__location = location
         self.__instances = {}  # Map of all generic instances

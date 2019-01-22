@@ -452,6 +452,26 @@ class AutoTypeAST(TypeAST):
 
 
 @dataclass(unsafe_hash=True, frozen=True)
+class AttributeAST(SyntaxNode):
+    tok_name: SyntaxToken
+    tok_open: Optional[SyntaxToken]
+    arguments: Sequence[ExpressionAST]
+    tok_close: Optional[SyntaxToken]
+
+    @property
+    def name(self) -> str:
+        return self.tok_name.value
+
+    @property
+    def location(self) -> Location:
+        return self.tok_name.location
+
+    @property
+    def children(self) -> Sequence[SyntaxSymbol]:
+        return self._cleanup(self.tok_name, self.tok_open, self.arguments, self.tok_close)
+
+
+@dataclass(unsafe_hash=True, frozen=True)
 class MemberAST(SyntaxNode):
     pass
 
@@ -474,6 +494,7 @@ class PassMemberAST(MemberAST):
 class TypeDeclarationAST(MemberAST):
     tok_name: SyntaxToken
     members: Sequence[MemberAST]
+    attributes: Sequence[AttributeAST]
 
     @property
     def name(self) -> str:
@@ -491,7 +512,7 @@ class StructAST(TypeDeclarationAST):
 
     @property
     def children(self) -> Sequence[SyntaxSymbol]:
-        return self._cleanup(self.tok_struct, self.tok_name, self.generic_parameters, self.members)
+        return self._cleanup(self.attributes, self.tok_struct, self.tok_name, self.generic_parameters, self.members)
 
 
 @dataclass(unsafe_hash=True, frozen=True)
@@ -501,11 +522,12 @@ class ClassAST(TypeDeclarationAST):
 
     @property
     def children(self) -> Sequence[SyntaxSymbol]:
-        return self._cleanup(self.tok_class, self.tok_name, self.generic_parameters, self.members)
+        return self._cleanup(self.attributes, self.tok_class, self.tok_name, self.generic_parameters, self.members)
 
 
 @dataclass(unsafe_hash=True, frozen=True)
 class FieldAST(MemberAST):
+    attributes: Sequence[AttributeAST]
     tok_name: SyntaxToken
     tok_colon: SyntaxToken
     type: TypeAST
@@ -521,7 +543,7 @@ class FieldAST(MemberAST):
 
     @property
     def children(self) -> Sequence[SyntaxSymbol]:
-        return [self.tok_name, self.tok_colon, self.type, self.tok_newline]
+        return [self.attributes, self.tok_name, self.tok_colon, self.type, self.tok_newline]
 
 
 @dataclass(unsafe_hash=True, frozen=True)
@@ -545,6 +567,7 @@ class ParameterAST(SyntaxNode):
 
 @dataclass(unsafe_hash=True, frozen=True)
 class FunctionAST(MemberAST):
+    attributes: Sequence[AttributeAST]
     tok_def: SyntaxToken
     tok_name: SyntaxToken
     generic_parameters: Sequence[GenericParameterAST]
@@ -559,6 +582,7 @@ class FunctionAST(MemberAST):
     @property
     def children(self) -> Sequence[SyntaxSymbol]:
         return self._cleanup(
+            self.attributes,
             self.tok_def,
             self.tok_name,
             self.generic_parameters,
@@ -852,7 +876,7 @@ class SubscribeExpressionAST(ExpressionAST):
 
 
 @dataclass(unsafe_hash=True, frozen=True)
-class AttributeAST(ExpressionAST):
+class AttributeExpressionAST(ExpressionAST):
     value: ExpressionAST
     tok_dot: SyntaxToken
     tok_name: SyntaxToken

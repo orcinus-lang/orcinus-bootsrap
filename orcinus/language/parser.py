@@ -11,7 +11,7 @@ from orcinus.language.syntax import *
 
 class Parser:
     IMPORTS_STARTS = (TokenID.Import, TokenID.From)
-    MEMBERS_STARTS = (TokenID.Pass, TokenID.Def, TokenID.Class, TokenID.Struct, TokenID.Name)
+    MEMBERS_STARTS = (TokenID.Pass, TokenID.Def, TokenID.Class, TokenID.Struct, TokenID.Name, TokenID.LeftSquare)
     EXPRESSION_STARTS = (
         TokenID.Number, TokenID.Name, TokenID.LeftParenthesis, TokenID.Plus, TokenID.Minus, TokenID.Tilde
     )
@@ -220,6 +220,47 @@ class Parser:
 
         return AliasAST(qualified_name=qualified_name, tok_as=tok_as, tok_alias=tok_alias)
 
+    def parse_attributes(self) -> Sequence[AttributeAST]:
+        """
+        attributes:
+            [ '[' '[' attribute { ',' attribute } ']' ']' new_line ] '\n'
+        """
+        if not self.match(TokenID.LeftSquare):
+            return SyntaxCollection(location=self.previous_location)
+
+        attributes = [
+            self.consume(TokenID.LeftSquare),
+            self.consume(TokenID.LeftSquare),
+            self.parse_attribute()
+        ]
+        while self.match(TokenID.Name):
+            attributes.append(self.parse_attribute())
+
+        attributes.extend([
+            self.consume(TokenID.RightSquare),
+            self.consume(TokenID.RightSquare),
+            self.consume(TokenID.NewLine),
+        ])
+        return SyntaxCollection(attributes)
+
+    def parse_attribute(self) -> AttributeAST:
+        """
+        attribute:
+            Name [ '(' arguments ')' ]
+        """
+        tok_name = self.consume(TokenID.Name)
+        if self.match(TokenID.LeftParenthesis):
+            tok_open = self.consume(TokenID.LeftParenthesis)
+            arguments = self.parse_arguments()
+            tok_close = self.consume(TokenID.RightParenthesis)
+        else:
+            tok_open = None
+            arguments = SyntaxCollection(location=self.previous_location)
+            tok_close = None
+
+        # noinspection PyArgumentList
+        return AttributeAST(tok_name=tok_name, tok_open=tok_open, arguments=arguments, tok_close=tok_close)
+
     def parse_members(self) -> Sequence[MemberAST]:
         """
         members:
@@ -239,20 +280,28 @@ class Parser:
             pass_member
             named_member
         """
+        if self.match(TokenID.LeftSquare):
+            attributes = self.parse_attributes()
+
+            # Check required tokens
+            self.match(TokenID.Def, TokenID.Class, TokenID.String, TokenID.Name)
+        else:
+            attributes = SyntaxCollection(location=self.previous_location)
+
         if self.match(TokenID.Def):
-            return self.parse_function()
+            return self.parse_function(attributes)
         elif self.match(TokenID.Class):
-            return self.parse_class()
+            return self.parse_class(attributes)
         elif self.match(TokenID.Struct):
-            return self.parse_struct()
+            return self.parse_struct(attributes)
         elif self.match(TokenID.Pass):
             return self.parse_pass_member()
         elif self.match(TokenID.Name):
-            return self.parse_named_member()
+            return self.parse_named_member(attributes)
 
         self.match(*self.MEMBERS_STARTS)
 
-    def parse_class(self) -> ClassAST:
+    def parse_class(self, attributes: Sequence[AttributeAST]) -> ClassAST:
         """
         class:
             'class' Name generic_parameters ':' type_members
@@ -264,13 +313,14 @@ class Parser:
 
         # noinspection PyArgumentList
         return ClassAST(
+            attributes=attributes,
             tok_class=tok_class,
             tok_name=tok_name,
             generic_parameters=generic_parameters,
             members=members
         )
 
-    def parse_struct(self) -> StructAST:
+    def parse_struct(self, attributes: Sequence[AttributeAST]) -> StructAST:
         """
         struct:
             'struct' Name generic_parameters ':' type_members
@@ -282,6 +332,7 @@ class Parser:
 
         # noinspection PyArgumentList
         return StructAST(
+            attributes=attributes,
             tok_struct=tok_struct,
             tok_name=tok_name,
             generic_parameters=generic_parameters,
@@ -316,7 +367,7 @@ class Parser:
         # noinspection PyArgumentList
         return PassMemberAST(tok_pass=tok_pass, tok_newline=tok_newline)
 
-    def parse_named_member(self) -> FieldAST:
+    def parse_named_member(self, attributes: Sequence[AttributeAST]) -> FieldAST:
         """
         named_member:
             Name ':' type
@@ -327,12 +378,18 @@ class Parser:
         tok_newline = self.consume(TokenID.NewLine)
 
         # noinspection PyArgumentList
-        return FieldAST(tok_name=tok_name, tok_colon=tok_colon, type=field_type, tok_newline=tok_newline)
+        return FieldAST(
+            attributes=attributes,
+            tok_name=tok_name,
+            tok_colon=tok_colon,
+            type=field_type,
+            tok_newline=tok_newline
+        )
 
-    def parse_function(self) -> FunctionAST:
+    def parse_function(self, attributes: Sequence[AttributeAST]) -> FunctionAST:
         """
         function:
-            'def' Name generic_parameters '(' parameters ')' [ '->' type ] ':' NewLine function_statement
+            attributes 'def' Name generic_parameters '(' parameters ')' [ '->' type ] ':' NewLine function_statement
         """
         tok_def = self.consume(TokenID.Def)
         tok_name = self.consume(TokenID.Name)
@@ -352,6 +409,7 @@ class Parser:
 
         # noinspection PyArgumentList
         return FunctionAST(
+            attributes=attributes,
             tok_def=tok_def,
             tok_name=tok_name,
             generic_parameters=generic_parameters,
@@ -807,7 +865,7 @@ class Parser:
         tok_name = self.consume(TokenID.Name)
 
         # noinspection PyArgumentList
-        return AttributeAST(value=value, tok_dot=tok_dot, tok_name=tok_name)
+        return AttributeExpressionAST(value=value, tok_dot=tok_dot, tok_name=tok_name)
 
     def parse_parenthesis_expression(self) -> ExpressionAST:
         """

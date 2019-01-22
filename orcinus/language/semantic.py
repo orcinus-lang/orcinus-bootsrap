@@ -108,6 +108,10 @@ class SemanticContext:
     def void_type(self) -> VoidType:
         return cast(VoidType, self.builtins_module.scope.resolve('void'))
 
+    @cached_property
+    def string_type(self) -> StringType:
+        return cast(StringType, self.builtins_module.scope.resolve('str'))
+
     def open(self, document: Document) -> SemanticModel:
         """ Open module from file """
         if document.uri in self.models:
@@ -240,7 +244,8 @@ class SemanticModel:
 
     @multimethod
     def resolve_type(self, node: TypeAST) -> Type:
-        raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented type resolving")
+        self.diagnostics.error(node.location, "Not implemented type resolving")
+        return ErrorType(self.module, node.location)
 
     @multimethod
     def resolve_type(self, node: NamedTypeAST) -> Type:
@@ -255,14 +260,22 @@ class SemanticModel:
         if isinstance(symbol, Type):
             return symbol
 
-        raise Diagnostic(
-            node.location, DiagnosticSeverity.Error, f"Not found symbol `{node.name} in current scope`")
+        self.diagnostics.error(node.location, f"Not found symbol `{node.name} in current scope`")
+        return ErrorType(self.module, node.location)
 
     @multimethod
     def resolve_type(self, node: ParameterizedTypeAST) -> Type:
         instance_type = self.resolve_type(node.type)
         arguments = [self.resolve_type(arg) for arg in node.arguments]
         return instance_type.instantiate(self.module, arguments, node.location)
+
+    def annotate_attributes(self, scope: LexicalScope, attributes: Sequence[AttributeAST]) -> Sequence[Attribute]:
+        result = []
+        for node in attributes:
+            result.append(
+                Attribute(node.name, [self.emit_value(arg) for arg in node.arguments], node.location)
+            )
+        return result
 
     def annotate_generics(self, scope: LexicalScope, generic_parameters: Sequence[GenericParameterAST]):
         parameters = []
@@ -275,7 +288,8 @@ class SemanticModel:
 
     @multimethod
     def annotate_symbol(self, node: SyntaxNode, parent: ContainerSymbol) -> Symbol:
-        raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented member declaration")
+        self.diagnostics.error(node.location, "Not implemented member declaration")
+        return ErrorSymbol(node.location)
 
     # noinspection PyUnusedLocal
     @multimethod
@@ -290,6 +304,7 @@ class SemanticModel:
     def annotate_symbol(self, node: FunctionAST, parent: ContainerSymbol) -> Function:
         scope = self.scopes[node]
         generic_parameters = self.annotate_generics(scope, node.generic_parameters)
+        attributes = self.annotate_attributes(scope, node.attributes)
 
         # if function is method of struct/class/interface and first arguments type is auto, then it type can
         # be inferred to owner type
@@ -306,7 +321,8 @@ class SemanticModel:
             return_type = self.resolve_type(node.return_type)
 
         func_type = FunctionType(self.module, parameters, return_type, node.location)
-        func = Function(parent, node.name, func_type, node.location, generic_parameters=generic_parameters)
+        func = Function(
+            parent, node.name, func_type, node.location, generic_parameters=generic_parameters, attributes=attributes)
 
         for node_param, func_param in zip(node.parameters, func.parameters):
             func_param.name = node_param.name
@@ -332,6 +348,10 @@ class SemanticModel:
 
     @multimethod
     def annotate_symbol(self, node: ClassAST, parent: ContainerSymbol) -> Type:
+        if self.module == self.context.builtins_module:
+            if node.name == "str":
+                return StringType(parent, node.location)
+
         generic_parameters = self.annotate_generics(self.scopes[node], node.generic_parameters)
         return ClassType(parent, node.name, node.location, generic_parameters=generic_parameters)
 
@@ -340,9 +360,10 @@ class SemanticModel:
         return GenericType(parent, node.name, node.location)
 
     @multimethod
-    def annotate_symbol(self, node: FieldAST, parent: ContainerSymbol) -> Field:
+    def annotate_symbol(self, node: FieldAST, parent: ContainerSymbol) -> Symbol:
         if not isinstance(parent, Type):
-            raise Diagnostic(node.location, DiagnosticSeverity.Error, "Field member must be declared in type")
+            self.diagnostics.error(node.location, "Field member must be declared in type")
+            return ErrorSymbol(node.location)
 
         field_type = self.resolve_type(node.type)
         return Field(cast(Type, parent), node.name, field_type, node.location)
@@ -446,12 +467,13 @@ class SemanticModel:
         return None
 
     def resolve_function(self, scope: LexicalScope, name: str, arguments: Sequence[Value], location: Location) \
-            -> Function:
+            -> Optional[Function]:
         func = self.find_function(scope, name, arguments, location)
         if not func:
             arguments = ', '.join(str(arg.type) for arg in arguments)
             message = f'Not found function ‘{name}({arguments})’ in current scope'
-            raise Diagnostic(location, DiagnosticSeverity.Error, message)
+            self.diagnostics.error(location, message)
+            return None
         return func
 
     @multimethod
@@ -541,7 +563,7 @@ class SemanticModel:
         return AssignStatement(symbol, value, node.location)
 
     @multimethod
-    def emit_assignment(self, node: AttributeAST, value: Value, location: Location) -> Statement:
+    def emit_assignment(self, node: AttributeExpressionAST, value: Value, location: Location) -> Statement:
         symbol = self.emit_symbol(node, True)
         if not isinstance(symbol, TargetValue):
             message = f"Can not assign value to target"
@@ -570,7 +592,7 @@ class SemanticModel:
         raise Diagnostic(node.location, DiagnosticSeverity.Error, "Required value, but got another object")
 
     @multimethod
-    def emit_value(self, node: AttributeAST) -> Value:
+    def emit_value(self, node: AttributeExpressionAST) -> Value:
         value = self.emit_symbol(node, True)
         if isinstance(value, Value):
             return value
@@ -580,12 +602,16 @@ class SemanticModel:
     @multimethod
     def emit_value(self, node: CallExpressionAST) -> Value:
         arguments = [self.emit_value(arg) for arg in node.arguments]
+        if any(isinstance(arg.type, ErrorType) for arg in arguments):
+            return ErrorValue(self.module, node.location)
 
         symbol = self.emit_symbol(node.value, False)
 
         # function call
         if isinstance(symbol, Overload):
             func = self.resolve_function(self.scopes[node], symbol.name, arguments, node.location)
+            if not func:
+                return ErrorValue(self.module, node.location)
             return CallInstruction(func, arguments, node.location)
 
         # type instance instantiate
@@ -595,13 +621,18 @@ class SemanticModel:
         # instance function call (uniform calls)
         elif not symbol and isinstance(node.value, NamedExpressionAST):
             func = self.resolve_function(self.scopes[node], node.value.name, arguments, node.location)
+            if not func:
+                return ErrorValue(self.module, node.location)
             return CallInstruction(func, arguments, node.location)
 
-        raise Diagnostic(node.location, DiagnosticSeverity.Error, f'Not found function for call')
+        self.diagnostics.error(node.location, f'Not found function for call')
+        return ErrorValue(self.module, node.location)
 
     @multimethod
     def emit_value(self, node: UnaryExpressionAST) -> Value:
         arguments = [self.emit_value(node.operand)]
+        if any(isinstance(arg.type, ErrorType) for arg in arguments):
+            return ErrorValue(self.module, node.location)
 
         if node.operator == UnaryID.Pos:
             func = self.resolve_function(self.scopes[node], '__pos__', arguments, node.location)
@@ -610,13 +641,18 @@ class SemanticModel:
         elif node.operator == UnaryID.Not:
             func = self.resolve_function(self.scopes[node], '__not__', arguments, node.location)
         else:
-            raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented unary operator")
+            func = None
+            self.diagnostics.error(node.location, "Not implemented unary operator")
 
+        if not func:
+            return ErrorValue(self.module, node.location)
         return CallInstruction(func, arguments, node.location)
 
     @multimethod
     def emit_value(self, node: BinaryExpressionAST) -> Value:
         arguments = [self.emit_value(node.left_operand), self.emit_value(node.right_operand)]
+        if any(isinstance(arg.type, ErrorType) for arg in arguments):
+            return ErrorValue(self.module, node.location)
 
         if node.operator == BinaryID.Add:
             func = self.resolve_function(self.scopes[node], '__add__', arguments, node.location)
@@ -627,13 +663,17 @@ class SemanticModel:
         elif node.operator == BinaryID.Div:
             func = self.resolve_function(self.scopes[node], '__div__', arguments, node.location)
         else:
-            raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented binary operator")
+            func = None
+            self.diagnostics.error(node.location, "Not implemented binary operator")
 
+        if not func:
+            return ErrorValue(self.module, node.location)
         return CallInstruction(func, arguments, node.location)
 
     @multimethod
     def emit_symbol(self, node: ExpressionAST, is_exists: bool) -> Symbol:
-        raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented symbol emitting")
+        self.diagnostics.error(node.location, "Not implemented symbol emitting")
+        return ErrorSymbol(node.location)
 
     @multimethod
     def emit_symbol(self, node: IntegerExpressionAST, is_exists: bool) -> Symbol:
@@ -653,12 +693,12 @@ class SemanticModel:
         scope = self.scopes[node]
         symbol = scope.resolve(node.name)
         if is_exists and not symbol:
-            raise Diagnostic(
-                node.location, DiagnosticSeverity.Error, f"Not found symbol `{node.name} in current scope`")
+            self.diagnostics.error(node.location, f"Not found symbol `{node.name} in current scope`")
+            return ErrorSymbol(node.location)
         return symbol
 
     @multimethod
-    def emit_symbol(self, node: AttributeAST, is_exists: bool) -> Symbol:
+    def emit_symbol(self, node: AttributeExpressionAST, is_exists: bool) -> Symbol:
         instance = self.emit_symbol(node.value, True)
         if isinstance(instance, Value):
             value_type = instance.type
@@ -669,20 +709,24 @@ class SemanticModel:
             # elif isinstance(symbol, Overload):
             #     return BoundedOverload(instance, symbol)
             elif is_exists and not symbol:
-                raise Diagnostic(
-                    node.location, DiagnosticSeverity.Error, f"Not found symbol `{node.name}` in type {value_type}`")
+                self.diagnostics.error(node.location, f"Not found symbol `{node.name}` in type {value_type}`")
+                return ErrorSymbol(node.location)
 
-        raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented symbol emitting")
+        self.diagnostics.error(node.location, "Not implemented symbol emitting")
+        return ErrorSymbol(node.location)
 
     @multimethod
     def emit_symbol(self, node: SubscribeExpressionAST, is_exists: bool) -> Symbol:
         symbol = self.emit_symbol(node.value, True)
         arguments = [self.emit_symbol(arg, True) for arg in node.arguments]
+        if any(isinstance(arg, ErrorType) or not isinstance(arg, Type) for arg in arguments):
+            return ErrorType(self.module, node.location)
 
         if isinstance(symbol, Type):
-            return symbol.instantiate(self.module, arguments, node.location)
+            return symbol.instantiate(self.module, cast(Sequence[Type], arguments), node.location)
 
-        raise Diagnostic(node.location, DiagnosticSeverity.Error, "Not implemented symbol emitting")
+        self.diagnostics.error(node.location, "Not implemented symbol emitting")
+        return ErrorSymbol(node.location)
 
 
 class InstantiateContext:
@@ -1158,6 +1202,20 @@ class GenericSymbol(NamedSymbol, abc.ABC):
         return super(GenericSymbol, self).__str__()
 
 
+class ErrorSymbol(Symbol):
+    __location: Location
+
+    def __init__(self, location: Location):
+        self.__location = location
+
+    @property
+    def location(self) -> Location:
+        return self.__location
+
+    def __str__(self):
+        return '<error>'
+
+
 class GenericParameter(NamedSymbol, abc.ABC):
     pass
 
@@ -1180,6 +1238,25 @@ class Value(Symbol, abc.ABC):
     @location.setter
     def location(self, value: Location):
         self.__location = value
+
+
+class Attribute(NamedSymbol):
+    def __init__(self, name: str, arguments: Sequence[Value], location: Location):
+        self.__location = location
+        self.__name = name
+        self.__arguments = arguments
+
+    @property
+    def name(self) -> str:
+        return self.__name
+
+    @property
+    def location(self) -> Location:
+        return self.__location
+
+    @property
+    def arguments(self) -> Sequence[Value]:
+        return self.__arguments
 
 
 class Module(NamedSymbol, ContainerSymbol):
@@ -1277,6 +1354,13 @@ class Type(MangledSymbol, GenericSymbol, OwnedSymbol, ContainerSymbol, abc.ABC):
         raise Diagnostic(location, DiagnosticSeverity.Error, "Can not instantiate non generic type")
 
 
+class ErrorType(Type):
+    """ Instance of this type is represented errors in semantic analyze """
+
+    def __init__(self, module: Module, location: Location):
+        super(ErrorType, self).__init__(module, '<error>', location)
+
+
 class VoidType(Type):
     def __init__(self, owner: ContainerSymbol, location: Location):
         super(VoidType, self).__init__(owner, 'void', location)
@@ -1285,6 +1369,11 @@ class VoidType(Type):
 class BooleanType(Type):
     def __init__(self, owner: ContainerSymbol, location: Location):
         super(BooleanType, self).__init__(owner, 'bool', location)
+
+
+class StringType(Type):
+    def __init__(self, owner: ContainerSymbol, location: Location):
+        super(StringType, self).__init__(owner, 'str', location)
 
 
 class IntegerType(Type):
@@ -1365,6 +1454,16 @@ class GenericType(GenericParameter, Type):
     pass
 
 
+class ErrorValue(Value):
+    """ Instance of this class is represented errors in semantic analyze """
+
+    def __init__(self, module: Module, location: Location):
+        super(ErrorValue, self).__init__(ErrorType(module, location), location)
+
+    def __str__(self):
+        return '<error>'
+
+
 class TargetValue(Value, abc.ABC):
     pass
 
@@ -1408,7 +1507,7 @@ class Variable(NamedSymbol, TargetValue):
 
 class Function(MangledSymbol, GenericSymbol, OwnedSymbol, Value):
     def __init__(self, owner: ContainerSymbol, name: str, func_type: FunctionType, location: Location, *,
-                 generic_parameters=None, generic_arguments=None, definition=None):
+                 generic_parameters=None, generic_arguments=None, definition=None, attributes=None):
         super(Function, self).__init__(func_type, location)
         self.__owner = owner
         self.__name = name
@@ -1420,6 +1519,7 @@ class Function(MangledSymbol, GenericSymbol, OwnedSymbol, Value):
         self.__generic_arguments = tuple(generic_arguments or [])
         self.__definition = definition
         self.__variables = []
+        self.__attributes = tuple(attributes or [])
 
         self.module.add_function(self)
 
@@ -1431,8 +1531,27 @@ class Function(MangledSymbol, GenericSymbol, OwnedSymbol, Value):
     def name(self) -> str:
         return self.__name
 
+    @property
+    def attributes(self) -> Sequence[Attribute]:
+        return self.__attributes
+
+    @cached_property
+    def is_native(self) -> bool:
+        return any(attr.name == 'native' for attr in self.attributes)
+
+    @cached_property
+    def native_name(self) -> Optional[str]:
+        native_attr = next((attr for attr in self.attributes if attr.name == 'native'), None)
+        if native_attr:
+            if len(native_attr.arguments) == 1:
+                assert isinstance(native_attr.arguments[0], StringConstant)
+                return native_attr.arguments[0].value
+            return self.name
+
     @cached_property
     def mangled_name(self) -> str:
+        if self.is_native:
+            return self.native_name
         context = MangledContext()
         return context.mangle(self)
 
@@ -1573,6 +1692,17 @@ class BooleanConstant(Value):
 
     def __str__(self):
         return "True" if self.value else "False"
+
+
+class StringConstant(Value):
+    def __init__(self, value_type: StringType, value: str, location: Location):
+        super(StringConstant, self).__init__(value_type, location)
+
+        self.value = value
+
+    def __str__(self):
+        value = self.value.replace('"', '\\"')
+        return f'"{value}"'
 
 
 class CallInstruction(Value):

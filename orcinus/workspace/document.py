@@ -81,7 +81,7 @@ class Document:
         """ Returns semantic model """
         if not self.__model:
             try:
-                context = SemanticContext(self.workspace)
+                context = SemanticContext(self.workspace, diagnostics=self.diagnostics)
                 self.__model = context.open(self)
             except Diagnostic as ex:
                 self.diagnostics.add(ex.location, ex.severity, ex.message, ex.source)

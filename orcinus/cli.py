@@ -48,8 +48,8 @@ def log_diagnostics(diagnostics: DiagnosticManager):
 
 
 def exit_diagnostics(diagnostics: DiagnosticManager):
+    log_diagnostics(diagnostics)
     if diagnostics.has_error:
-        log_diagnostics(diagnostics)
         sys.exit(1)
 
 

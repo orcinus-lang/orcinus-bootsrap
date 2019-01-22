@@ -1,3 +1,6 @@
 
-# Exit from application. Returns `status` as result of application execution
+# Exit from application.
+#
+# Returns `status` as result of application execution.
+[[ native ]]
 def exit(status: int): ...

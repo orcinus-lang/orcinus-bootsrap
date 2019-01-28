@@ -4,9 +4,10 @@
 # of the MIT license.  See the LICENSE file for details.
 from __future__ import annotations
 
-from orcinus.core.diagnostics import DiagnosticSeverity, Diagnostic, DiagnosticManager
+from orcinus.core.diagnostics import DiagnosticManager
 from orcinus.language.scanner import Scanner
 from orcinus.language.syntax import *
+from orcinus.utils import camel_case_to_lower_space
 
 
 class Parser:
@@ -21,6 +22,7 @@ class Parser:
         self.diagnostics = diagnostics if diagnostics is not None else DiagnosticManager()
         self.tokens = list(Scanner(filename, stream, diagnostics=diagnostics))
         self.index = 0
+        self.is_error_mode = False  # marker for error mode
 
     @property
     def current_token(self) -> SyntaxToken:
@@ -31,39 +33,59 @@ class Parser:
         location = self.current_token.location
         return Location(location.filename, location.begin, location.begin)
 
-    def match(self, *indexes: TokenID) -> bool:
+    def match(self, *indices: TokenID) -> bool:
         """
         Match current token
 
-        :param indexes:     Token identifiers
+        :param indices:     Token identifiers
         :return: True, if current token is matched passed identifiers
         """
-        return self.current_token.id in indexes
+        return self.current_token.id in indices
 
-    def consume(self, *indexes: TokenID) -> SyntaxToken:
+    def consume(self, *indices: TokenID) -> SyntaxToken:
         """
-        Consume current token
+        Consume current token. If token is not matched required IDs then go to error mode and return error token
 
-        :param indexes:     Token identifiers
+        :param indices:     Token identifiers
         :return: Return consumed token
         :raise Diagnostic if current token is not matched passed identifiers
         """
-        if not indexes or self.match(*indexes):
+
+        # check
+        if not indices or self.match(*indices):
             token = self.current_token
-            self.index += 1
+            if self.index < len(self.tokens) - 1:
+                self.index += 1
             return token
 
         # generate exception message
-        existed_name = self.current_token.id.name
-        if len(indexes) > 1:
-            required_names = ', '.join(f'‘{x.name}’' for x in indexes)
-            message = f"Expected one of {required_names}, but got ‘{existed_name}’"
-        else:
-            required_name = indexes[0].name
-            message = f"Expected ‘{required_name}’, but got ‘{existed_name}’"
-        raise Diagnostic(self.current_token.location, DiagnosticSeverity.Error, message)
+        if not self.is_error_mode:
+            self.is_error_mode = True
+            message = self.get_error_message(*indices)
+            self.diagnostics.error(self.current_token.location, message)
 
-    def parse(self) -> ModuleAST:
+        # return error token
+        return SyntaxToken(TokenID.Error, '', self.previous_location)
+
+    def resume(self, *indices: TokenID):
+        """ Resume normal mode by set of synchronizing tokens """
+        trivia = []
+        while not self.match(*indices):
+            trivia.append(self.consume())
+
+        self.is_error_mode = False
+        return self.consume(*indices)
+
+    def get_error_message(self, *indices: TokenID):
+        existed_name = camel_case_to_lower_space(self.current_token.id.name)
+        if len(indices) > 1:
+            required_names = ', '.join(f'‘{camel_case_to_lower_space(x.name)}’' for x in indices)
+            return f"Expected one of {required_names}, but got ‘{existed_name}’"
+        else:
+            required_name = camel_case_to_lower_space(indices[0].name)
+            return f"Expected ‘{required_name}’, but got ‘{existed_name}’"
+
+    def parse(self) -> SyntaxTree:
         """
         Parse module from source
 
@@ -75,7 +97,7 @@ class Parser:
         tok_eof = self.consume(TokenID.EndFile)
 
         # noinspection PyArgumentList
-        return ModuleAST(imports=imports, members=members, tok_eof=tok_eof)
+        return SyntaxTree(imports=imports, members=members, tok_eof=tok_eof)
 
     def parse_type(self) -> TypeAST:
         """
@@ -163,7 +185,7 @@ class Parser:
             qualified_name = self.parse_qualified_name()
             tok_import = self.consume(TokenID.Import)
             aliases = self.parse_aliases()
-            tok_newline = self.consume(TokenID.NewLine)
+            tok_newline = self.resume(TokenID.NewLine)
 
             # noinspection PyArgumentList
             return ImportFromAST(
@@ -176,7 +198,7 @@ class Parser:
         elif self.match(TokenID.Import):
             tok_import = self.consume(TokenID.Import)
             aliases = self.parse_aliases()
-            tok_newline = self.consume(TokenID.NewLine)
+            tok_newline = self.resume(TokenID.NewLine)
 
             return ImportAST(tok_import=tok_import, aliases=aliases, tok_newline=tok_newline)
 

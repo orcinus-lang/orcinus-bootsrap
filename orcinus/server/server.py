@@ -107,14 +107,16 @@ class LanguageTCPClient:
     def handle(self):
         while True:
             data = self.__read_message()
+            logger.debug(f"Receive message: {data}")
             response = JSONRPCResponseManager.handle(data, self.dispatcher)
             if response is not None:
+                logger.debug(f"Send message: {response.data}")
                 self.__write_message(data=response.data)
 
     def notify(self, method, params=None):
         """ Send a notification to the client, expects no response. """
-        logger.debug("Sending notification %s", method)
         request = JSONRPC20Request(method=method, params=params, is_notification=True)
+        logger.debug(f"Sending notification {method} {request.data}")
         self.__write_message(data=request.data)
 
     @staticmethod

@@ -2,6 +2,7 @@
 #
 # This software may be modified and distributed under the terms
 # of the MIT license.  See the LICENSE file for details.
+import re
 
 
 # noinspection PyPep8Naming
@@ -14,3 +15,8 @@ class cached_property(object):
             result = instance.__dict__[self.func.__name__] = self.func(instance)
             return result
         return None  # ABC
+
+
+def camel_case_to_lower_space(label):
+    label = re.sub("([a-z])([A-Z])", "\g<1> \g<2>", label)
+    return label.lower()

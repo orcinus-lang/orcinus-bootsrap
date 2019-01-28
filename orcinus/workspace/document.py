@@ -10,7 +10,7 @@ import urllib.parse
 import weakref
 
 from orcinus.core.diagnostics import DiagnosticManager, Diagnostic
-from orcinus.language import ModuleAST, SemanticModel, Module, Parser
+from orcinus.language import SyntaxTree, SemanticModel, Module, Parser
 from orcinus.language.semantic import SemanticContext
 from orcinus.utils import cached_property
 
@@ -69,7 +69,7 @@ class Document:
         return self.__diagnostics
 
     @property
-    def tree(self) -> ModuleAST:
+    def tree(self) -> SyntaxTree:
         """ Returns syntax tree """
         if not self.__tree:
             parser = Parser(self.uri, io.StringIO(self.source), diagnostics=self.diagnostics)

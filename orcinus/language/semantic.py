@@ -128,7 +128,7 @@ class SemanticContext:
 
 
 class SemanticModel:
-    def __init__(self, context: SemanticContext, module_name: str, tree: ModuleAST, *,
+    def __init__(self, context: SemanticContext, module_name: str, tree: SyntaxTree, *,
                  diagnostics: DiagnosticManager = None):
         self.diagnostics = diagnostics if diagnostics is not None else DiagnosticManager()
         self.context = context
@@ -170,7 +170,7 @@ class SemanticModel:
         return parent
 
     @multimethod
-    def annotate_scope(self, _1: ModuleAST, _2=None) -> LexicalScope:
+    def annotate_scope(self, _1: SyntaxTree, _2=None) -> LexicalScope:
         return LexicalScope()
 
     @multimethod
@@ -189,7 +189,7 @@ class SemanticModel:
     def annotate_scope(self, _: StructAST, parent: LexicalScope) -> LexicalScope:
         return LexicalScope(parent)
 
-    def import_symbols(self, node: ModuleAST):
+    def import_symbols(self, node: SyntaxTree):
         """ Import symbols from imported scopes """
 
         # TODO: Import builtin module
@@ -205,7 +205,8 @@ class SemanticModel:
                     if not symbol:
                         self.diagnostics.error(
                             alias.location, f"Not found symbol ‘{alias.name}’ in module ‘{child.module}’")
-                    scope.append(symbol, name=alias.alias or alias.name)
+                    else:
+                        scope.append(symbol, name=alias.alias or alias.name)
 
             else:
                 self.diagnostics.error(node.location, "Not implemented symbol importing")
@@ -293,7 +294,7 @@ class SemanticModel:
 
     # noinspection PyUnusedLocal
     @multimethod
-    def annotate_symbol(self, node: ModuleAST, parent=None) -> Module:
+    def annotate_symbol(self, node: SyntaxTree, parent=None) -> Module:
         return Module(self.context, self.module_name, Location(node.location.filename))
 
     @multimethod
@@ -368,7 +369,7 @@ class SemanticModel:
         field_type = self.resolve_type(node.type)
         return Field(cast(Type, parent), node.name, field_type, node.location)
 
-    def emit_functions(self, module: ModuleAST):
+    def emit_functions(self, module: SyntaxTree):
         for member in module.members:
             if isinstance(member, FunctionAST):
                 self.emit_function(member)
@@ -1161,7 +1162,8 @@ class ContainerSymbol(Symbol, abc.ABC):
 
     def add_member(self, symbol: OwnedSymbol):
         self.__members.append(symbol)
-        self.__scope.append(symbol)
+        if isinstance(symbol, NamedSymbol):
+            self.__scope.append(symbol)
 
 
 class GenericSymbol(NamedSymbol, abc.ABC):

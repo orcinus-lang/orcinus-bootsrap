@@ -5,4 +5,4 @@
 
 from orcinus.language.parser import Parser
 from orcinus.language.semantic import SemanticModel, Module
-from orcinus.language.syntax import ModuleAST
+from orcinus.language.syntax import SyntaxTree

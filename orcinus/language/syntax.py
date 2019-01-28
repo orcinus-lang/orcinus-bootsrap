@@ -48,6 +48,7 @@ class SyntaxSymbol(abc.ABC):
 
 @enum.unique
 class TokenID(enum.IntEnum):
+    Error = -1
     Name = enum.auto()
     Number = enum.auto()
     LeftParenthesis = enum.auto()
@@ -301,7 +302,7 @@ class SyntaxCollection(SyntaxNode, collections.abc.Sequence):
 
 
 @dataclass(unsafe_hash=True, frozen=True)
-class ModuleAST(SyntaxNode):
+class SyntaxTree(SyntaxNode):
     imports: Sequence[ImportAST]
     members: Sequence[MemberAST]
     tok_eof: SyntaxToken

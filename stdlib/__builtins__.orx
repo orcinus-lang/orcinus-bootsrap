@@ -1,3 +1,81 @@
+# Boolean type, can contains only two values - `True` or `False`
+struct bool:
+    # Implicit constructor for boolean values
+    [[inline]]
+    def __new__[T: ToBoolean](self, value: T) -> bool:
+        return __bool__(value)
+
+    # Identity function
+    [[inline]]
+    def __bool__(self) -> bool:
+        return self
+
+
+# 32-bit integer type
+struct int:
+    def __neg__(self) -> int: ...
+    def __pos__(self) -> int: ...
+    def __add__(self, other: int) -> int: ...
+    def __sub__(self, other: int) -> int: ...
+    def __mul__(self, other: int) -> int: ...
+
+    # Return True if integer number is not zero
+    def __bool__(self) -> bool:
+        return self != 0
+
+
+# Void type, can contains only one value - `None`
+struct void:
+    def __bool__(self) -> bool:
+        return False
+
+    def __eq__(self, other: void) -> bool:
+        return True
+
+    def __ne__(self, other: void) -> bool:
+        return False
+
+
+# Unicode character type. Internally it's a 32-bit integer type
+struct char:
+    # Returns integer representation of unicode character
+    [[native('orx_utf8str_ord')]]
+    def __int__(self) -> int:  ...
+
+    # Compare two unicode character
+    [[native('orx_utf8char_cmp')]]
+    def __cmp__(self, other: char) -> int: ...
+
+
+# Unicode string type. It's type is used utf-8 for internal storage characters.
+class str:
+    # Construct empty string
+    [[inline]]
+    def __new__() -> str:
+        return ""
+
+    # Construct string from value
+    [[inline]]
+    def __new__[T: String](value: T) -> str:
+        return value.__str__()
+
+    # Return count of unicode characters in string. It's
+    [[native('orx_utf8str_len')]]
+    def __len__(self) -> int: ...
+
+    # Return character by it's index
+    [[native('orx_utf8str_char')]]
+    def __getitem__(self, index: int) -> char: ...
+
+    # Compare two strings
+    [[native('orx_utf8str_cmp')]]
+    def __cmp__(self, other: str) -> int: ...
+
+    # Identity function
+    [[inline]]
+    def __str__(self) -> str:
+        return self
+
 
 # This interface is required for values that can be converted to boolean values
 interface ToBoolean:
@@ -44,89 +122,10 @@ interface Compare[T]:
     def __cmp__(self, other: T) -> int: ...
 
 
-# 32-bit integer type
-struct int:
-    def __neg__(self) -> int: ...
-    def __pos__(self) -> int: ...
-    def __add__(self, other: int) -> int: ...
-    def __sub__(self, other: int) -> int: ...
-    def __mul__(self, other: int) -> int: ...
-
-    # Return True if integer number is not zero
-    def __bool__(self) -> bool:
-        return self != 0
-
-
-# Boolean type, can contains only two values - `True` or `False`
-struct bool:
-    # Implicit constructor for boolean values
-    [[inline]]
-    def __new__[T: ToBoolean](self, value: T) -> bool:
-        return __bool__(value)
-
-    # Identity function
-    [[inline]]
-    def __bool__(self) -> bool:
-        return self
-
-
-# Void type, can contains only one value - `None`
-struct void:
-    def __bool__(self) -> bool:
-        return False
-
-    def __eq__(self, other: void) -> bool:
-        return True
-
-    def __ne__(self, other: void) -> bool:
-        return False
-
-
-# Unicode string type. It's type is used utf-8 for internal storage characters.
-class str:
-    # Construct empty string
-    [[inline]]
-    def __new__() -> str:
-        return ""
-
-    # Construct string from value
-    [[inline]]
-    def __new__[T: String](value: T) -> str:
-        return value.__str__()
-
-    # Return count of unicode characters in string. It's
-    [[native('orx_utf8str_len')]]
-    def __len__(self) -> int: ...
-
-    # Return character by it's index
-    [[native('orx_utf8str_char')]]
-    def __getitem__(self, index: int) -> char: ...
-
-    # Compare two strings
-    [[native('orx_utf8str_cmp')]]
-    def __cmp__(self, other: str) -> int: ...
-
-    # Identity function
-    [[inline]]
-    def __str__(self) -> str:
-        return self
-
-
-# Unicode character type. Internally it's a 32-bit integer type
-struct char:
-    # Returns integer representation of unicode character
-    [[native('orx_utf8str_ord')]]
-    def __int__(self) -> int:  ...
-
-    # Compare two unicode character
-    [[native('orx_utf8char_cmp')]]
-    def __cmp__(self, other: char) -> int: ...
-
-
 # Return length for object
 [[inline]]
 def len[T: Length](self: T) -> int:
-    return self.__len__()
+    return __len__(self)
 
 
 # Return True if object's length is not zero
@@ -137,13 +136,13 @@ def __bool__[T: Length](self: T) -> bool:
 
 # Compare two objects
 def cmp[T: Compare[T]](self: T, other: T) -> int:
-    return self.__cmp__(other)
+    return __cmp__(self, other)
 
 
 # Return hash for object
 [[inline]]
 def hash[T: Hashable](self: T) -> int:
-    return self.__hash__()
+    return __hash__(self)
 
 
 # Return next element from iterator
@@ -151,7 +150,7 @@ def hash[T: Hashable](self: T) -> int:
 # :raise StopIteration after last item in iterator
 [[inline]]
 def next[T](self: Iterator[T]) -> T:
-    return self.__next__()
+    return __next__(self)
 
 
 # Return True if one of comparable values is equal to other
@@ -188,11 +187,3 @@ def __lt__[T: Compare[T]](self: T, other: T) -> bool:
 [[inline]]
 def __gt__[T: Compare[T]](self: T, other: T) -> bool:
     return cmp(self, other) > 0
-
-
-[[inline]]
-def enumerate[T](iterable: Iterable[T]) -> Iterator[(int, T)]:
-    index = 0
-    for item in iterable:
-        yield index, item
-        index = index + 1

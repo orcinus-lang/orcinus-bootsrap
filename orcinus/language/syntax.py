@@ -448,12 +448,12 @@ class GenericParameterAST(SyntaxNode):
         return self.tok_name.value
 
     @property
-    def location(self) -> Location:
-        return self.tok_name.location
+    def children(self) -> Sequence[SyntaxSymbol]:
+        return [self.tok_name, self.tok_colon, self.concepts]
 
     @property
-    def children(self) -> Sequence[SyntaxSymbol]:
-        return [self.tok_name]
+    def location(self) -> Location:
+        return self.tok_name.location
 
 
 @dataclass(unsafe_hash=True, frozen=True)

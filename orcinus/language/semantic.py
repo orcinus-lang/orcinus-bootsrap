@@ -191,6 +191,14 @@ class SemanticModel:
     def annotate_scope(self, _: StructAST, parent: LexicalScope) -> LexicalScope:
         return LexicalScope(parent)
 
+    @multimethod
+    def annotate_scope(self, _: InterfaceAST, parent: LexicalScope) -> LexicalScope:
+        return LexicalScope(parent)
+
+    @multimethod
+    def annotate_scope(self, _: EnumAST, parent: LexicalScope) -> LexicalScope:
+        return LexicalScope(parent)
+
     def import_symbols(self, node: ModuleAST):
         """ Import symbols from imported scopes """
 
@@ -283,16 +291,17 @@ class SemanticModel:
     def annotate_generics(self, scope: LexicalScope, generic_parameters: Sequence[GenericParameterAST]):
         parameters = []
         for generic_node in generic_parameters:
-            generic = GenericType(self.module, generic_node.name, generic_node.location)
+            generic = self.annotate_generics(generic_node)
 
             scope.append(generic)
             parameters.append(generic)
+
         return parameters
 
     @multimethod
     def annotate_symbol(self, node: SyntaxNode, parent: ContainerSymbol) -> Symbol:
         self.diagnostics.error(node.location, "Not implemented member declaration")
-        return ErrorSymbol(node.location)
+        return ErrorSymbol(self.module, node.location)
 
     # noinspection PyUnusedLocal
     @multimethod
@@ -359,14 +368,19 @@ class SemanticModel:
         return ClassType(parent, node.name, node.location, generic_parameters=generic_parameters)
 
     @multimethod
-    def annotate_symbol(self, node: GenericParameterAST, parent: ContainerSymbol) -> Symbol:
-        return GenericType(parent, node.name, node.location)
+    def annotate_symbol(self, node: InterfaceAST, parent: ContainerSymbol) -> Type:
+        generic_parameters = self.annotate_generics(self.scopes[node], node.generic_parameters)
+        return InterfaceType(parent, node.name, node.location, generic_parameters=generic_parameters)
+
+    @multimethod
+    def annotate_symbol(self, node: GenericParameterAST, parent: ContainerSymbol) -> GenericType:
+        return GenericType(self.module, node.name, node.location)
 
     @multimethod
     def annotate_symbol(self, node: FieldAST, parent: ContainerSymbol) -> Symbol:
         if not isinstance(parent, Type):
             self.diagnostics.error(node.location, "Field member must be declared in type")
-            return ErrorSymbol(node.location)
+            return ErrorSymbol(self.module, node.location)
 
         field_type = self.resolve_type(node.type)
         return Field(cast(Type, parent), node.name, field_type, node.location)
@@ -502,12 +516,14 @@ class SemanticModel:
         return_type = self.current_function.return_type
         void_type = self.context.void_type
 
-        if value and value.type != return_type:
+        if isinstance(return_type, ErrorType) or isinstance(value.type, ErrorType):
+            pass  # Skip error propagation
+        elif value and value.type != return_type:
             message = f"Return statement value must have ‘{return_type}’ type, got ‘{value.type}’"
-            raise Diagnostic(node.location, DiagnosticSeverity.Error, message)
+            self.diagnostics.error(node.location, message)
         elif not value and void_type != return_type:
             message = f"Return statement value must have ‘{return_type}’ type, got ‘{void_type}’"
-            raise Diagnostic(node.location, DiagnosticSeverity.Error, message)
+            self.diagnostics.error(node.location, message)
         return ReturnStatement(value, node.location)
 
     @multimethod
@@ -584,6 +600,10 @@ class SemanticModel:
 
     @multimethod
     def emit_value(self, node: IntegerExpressionAST) -> Value:
+        return cast(Value, self.emit_symbol(node, True))
+
+    @multimethod
+    def emit_value(self, node: StringExpressionAST) -> Value:
         return cast(Value, self.emit_symbol(node, True))
 
     @multimethod
@@ -676,11 +696,15 @@ class SemanticModel:
     @multimethod
     def emit_symbol(self, node: ExpressionAST, is_exists: bool) -> Symbol:
         self.diagnostics.error(node.location, "Not implemented symbol emitting")
-        return ErrorSymbol(node.location)
+        return ErrorSymbol(self.module, node.location)
 
     @multimethod
     def emit_symbol(self, node: IntegerExpressionAST, is_exists: bool) -> Symbol:
         return IntegerConstant(self.context.integer_type, node.value, node.location)
+
+    @multimethod
+    def emit_symbol(self, node: StringExpressionAST, is_exists: bool) -> Symbol:
+        return StringConstant(self.context.string_type, node.value, node.location)
 
     @multimethod
     def emit_symbol(self, node: NamedExpressionAST, is_exists: bool) -> Symbol:
@@ -697,7 +721,7 @@ class SemanticModel:
         symbol = scope.resolve(node.name)
         if is_exists and not symbol:
             self.diagnostics.error(node.location, f"Not found symbol `{node.name} in current scope`")
-            return ErrorSymbol(node.location)
+            return ErrorSymbol(self.module, node.location)
         return symbol
 
     @multimethod
@@ -713,10 +737,10 @@ class SemanticModel:
             #     return BoundedOverload(instance, symbol)
             elif is_exists and not symbol:
                 self.diagnostics.error(node.location, f"Not found symbol `{node.name}` in type {value_type}`")
-                return ErrorSymbol(node.location)
+                return ErrorSymbol(self.module, node.location)
 
         self.diagnostics.error(node.location, "Not implemented symbol emitting")
-        return ErrorSymbol(node.location)
+        return ErrorSymbol(self.module, node.location)
 
     @multimethod
     def emit_symbol(self, node: SubscribeExpressionAST, is_exists: bool) -> Symbol:
@@ -729,7 +753,7 @@ class SemanticModel:
             return symbol.instantiate(self.module, cast(Sequence[Type], arguments), node.location)
 
         self.diagnostics.error(node.location, "Not implemented symbol emitting")
-        return ErrorSymbol(node.location)
+        return ErrorSymbol(self.module, node.location)
 
 
 class InstantiateContext:
@@ -761,6 +785,7 @@ class InstantiateContext:
         elif generic.generic_arguments:
             generic_arguments = [self.instantiate(arg, location) for arg in generic.generic_arguments]
             result_type = generic.instantiate(self.module, generic_arguments, location)
+
         else:
             result_type = generic
 
@@ -1208,8 +1233,15 @@ class GenericSymbol(NamedSymbol, abc.ABC):
 class ErrorSymbol(ContainerSymbol):
     __location: Location
 
-    def __init__(self, location: Location):
+    def __init__(self, module: Module, location: Location):
+        super().__init__()
+
+        self.__module = module
         self.__location = location
+
+    @property
+    def module(self):
+        return self.__module
 
     @property
     def location(self) -> Location:
@@ -1420,6 +1452,17 @@ class StructType(Type):
         return instance
 
 
+class InterfaceType(Type):
+    def instantiate(self, module: Module, generic_arguments: Sequence[Type], location: Location):
+        instance = module.find_instance(self.definition or self, generic_arguments)
+        if not instance:
+            context = InstantiateContext(module)
+            context.aggregate(self.generic_parameters, generic_arguments)
+            return InterfaceType(module, self.name, self.location, generic_arguments=generic_arguments, definition=self)
+        module.register_instance(self.definition or self, generic_arguments, instance)
+        return instance
+
+
 class FunctionType(Type):
     def __init__(self, owner: ContainerSymbol, parameters: Sequence[Type], return_type: Type, location: Location):
         super(FunctionType, self).__init__(owner, "Function", location)
@@ -1454,7 +1497,29 @@ class FunctionType(Type):
 
 
 class GenericType(GenericParameter, Type):
-    pass
+    def __init__(self,
+                 owner: ContainerSymbol,
+                 name: str,
+                 location: Location, *,
+                 generic_parameters=None,
+                 generic_arguments=None,
+                 definition=None):
+        super().__init__(
+            owner, name, location,
+            generic_parameters=generic_parameters,
+            generic_arguments=generic_arguments,
+            definition=definition
+        )
+
+        self.__concepts = tuple()
+
+    @property
+    def concepts(self) -> Sequence[InterfaceType]:
+        return self.__concepts
+
+    def configure(self, concepts: Sequence[InterfaceType]):
+        assert not self.__concepts
+        self.__concepts = concepts
 
 
 class ErrorValue(Value):
@@ -1557,6 +1622,10 @@ class Function(MangledSymbol, GenericSymbol, OwnedSymbol, Value):
             return self.native_name
         context = MangledContext()
         return context.mangle(self)
+
+    @cached_property
+    def is_inline(self) -> bool:
+        return any(attr.name == 'inline' for attr in self.attributes)
 
     @property
     def definition(self) -> Function:

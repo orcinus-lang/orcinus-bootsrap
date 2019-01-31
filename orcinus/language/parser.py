@@ -803,7 +803,7 @@ class Parser:
             [ expression { ',' expression } [','] ]
         """
         if not self.match(*self.EXPRESSION_STARTS):
-            return tuple()
+            return SyntaxCollection(location=self.previous_location)
 
         arguments = [self.parse_expression()]
         while self.match(TokenID.Comma):
@@ -813,7 +813,7 @@ class Parser:
             else:
                 break
 
-        return tuple(arguments)
+        return SyntaxCollection(arguments)
 
     def parse_target_list(self) -> ExpressionAST:
         """

@@ -71,6 +71,8 @@ class LexicalScope:
         return symbol
 
     def append(self, symbol: NamedSymbol, name: str = None) -> None:
+        if isinstance(symbol, ErrorSymbol):
+            breakpoint()
         name = name or symbol.name
         try:
             existed_symbol = self.__defined[name]
@@ -217,10 +219,11 @@ class SemanticModel:
 
         # Declare symbol in parent scope
         self.symbols[node] = symbol
-        if scope is not None and isinstance(symbol, NamedSymbol):
-            scope.append(symbol)
-        if parent:
-            parent.add_member(symbol)
+        if isinstance(symbol, NamedSymbol):
+            if scope is not None:
+                scope.append(symbol)
+            if isinstance(parent, ContainerSymbol):
+                parent.add_member(symbol)
 
         types = []
         functions = []
@@ -1202,7 +1205,7 @@ class GenericSymbol(NamedSymbol, abc.ABC):
         return super(GenericSymbol, self).__str__()
 
 
-class ErrorSymbol(Symbol):
+class ErrorSymbol(ContainerSymbol):
     __location: Location
 
     def __init__(self, location: Location):

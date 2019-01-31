@@ -1,0 +1,28 @@
+name: orcinus
+license: MIT
+version: 0.1
+authors:
+  - Vasiliy Sheredeko: alurin@orcinus-lang.org
+
+
+compiler:
+  orcinus: ~=0.1
+
+
+packages:
+  stdlib:
+    description: Standart library for all targets
+    requirements:
+      orcinus: ~=0.1
+
+  webassembly:
+    description: Standart library for WebAssembly target
+    requirements:
+      stdlib: ~=0.1
+
+  compiler:
+    description: Compiler for orcinus
+    requirements:
+      stdlib: ~=0.1
+      llvm: ~=6.0
+      argument-parser: ~=0.1

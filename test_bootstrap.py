@@ -9,7 +9,6 @@ import sys
 import warnings as pywarnings
 
 import pytest
-import logging
 
 OPT_EXECUTABLE = 'opt-6.0'
 LLI_EXECUTABLE = 'lli-6.0'
@@ -27,13 +26,16 @@ def find_scripts(path):
 TEST_FIXTURES = sorted(s for s in find_scripts('./tests'))
 
 
-def execute(command, *, input=None, is_binary=False):
+def execute(command, *, input=None, is_binary=False, is_error=False):
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE)
     stdout, stderr = process.communicate(input)
     if not is_binary:
         stdout, stderr = stdout.decode('utf-8').rstrip(), stderr.decode('utf-8').rstrip()
     if process.returncode:
         error = stderr if isinstance(stderr, str) else stderr.decode('utf-8')
+        sys.stderr.write(error)
+        if is_error:
+            raise RuntimeError(error)
         sys.stderr.write(error)
     return process.returncode, stdout, stderr
 
@@ -78,7 +80,7 @@ def compile_and_execute(filename, *, name, opt_level, arguments, input=None):
     flags.extend(get_build_options())
     flags.extend(['-'])
     flags.extend(arguments)
-    return (True,) + execute([LLI_EXECUTABLE, f'-O{opt_level}'] + flags, input=assembly)
+    return (True,) + execute([LLI_EXECUTABLE, f'-O{opt_level}'] + flags, input=assembly, is_error=True)
 
 
 def remove_startswith_and_strip(haystack: str, needle: str) -> str:

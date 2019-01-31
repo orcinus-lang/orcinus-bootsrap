@@ -71,6 +71,7 @@ class TokenID(enum.IntEnum):
     Import = enum.auto()
     From = enum.auto()
     Return = enum.auto()
+    Yield = enum.auto()
     As = enum.auto()
     Then = enum.auto()
     Ellipsis = enum.auto()
@@ -80,7 +81,15 @@ class TokenID(enum.IntEnum):
     While = enum.auto()
     Struct = enum.auto()
     Class = enum.auto()
-    Equals = enum.auto()
+    Interface = enum.auto()
+    Enum = enum.auto()
+    Equal = enum.auto()
+    EqEqual = enum.auto()
+    NotEqual = enum.auto()
+    LessEqual = enum.auto()
+    GreatEqual = enum.auto()
+    Less = enum.auto()
+    Great = enum.auto()
     Star = enum.auto()
     DoubleStar = enum.auto()
     Plus = enum.auto()
@@ -89,6 +98,13 @@ class TokenID(enum.IntEnum):
     DoubleSlash = enum.auto()
     Tilde = enum.auto()
     String = enum.auto()
+    And = enum.auto()
+    Or = enum.auto()
+    Xor = enum.auto()
+    LogicAnd = enum.auto()
+    LogicOr = enum.auto()
+    For = enum.auto()
+    In = enum.auto()
 
 
 @enum.unique
@@ -395,14 +411,37 @@ class TypeAST(SyntaxNode):
 
 
 @dataclass(unsafe_hash=True, frozen=True)
+class TupleTypeAST(TypeAST):
+    arguments: Sequence[TypeAST]
+
+    @property
+    def children(self) -> Sequence[SyntaxSymbol]:
+        return [self.arguments]
+
+    @property
+    def location(self) -> Location:
+        return cast(SyntaxCollection, self.arguments).location
+
+
+@dataclass(unsafe_hash=True, frozen=True)
 class ParameterizedTypeAST(TypeAST):
     type: TypeAST
     arguments: Sequence[TypeAST]
+
+    @property
+    def children(self) -> Sequence[SyntaxSymbol]:
+        return [self.type, self.arguments]
+
+    @property
+    def location(self) -> Location:
+        return self.type.location
 
 
 @dataclass(unsafe_hash=True, frozen=True)
 class GenericParameterAST(SyntaxNode):
     tok_name: SyntaxToken
+    tok_colon: Optional[SyntaxToken]
+    concepts: Sequence[TypeAST]
 
     @property
     def name(self) -> str:
@@ -523,6 +562,26 @@ class ClassAST(TypeDeclarationAST):
     @property
     def children(self) -> Sequence[SyntaxSymbol]:
         return self._cleanup(self.attributes, self.tok_class, self.tok_name, self.generic_parameters, self.members)
+
+
+@dataclass(unsafe_hash=True, frozen=True)
+class InterfaceAST(TypeDeclarationAST):
+    tok_interface: SyntaxToken
+    generic_parameters: Sequence[GenericParameterAST]
+
+    @property
+    def children(self) -> Sequence[SyntaxSymbol]:
+        return self._cleanup(self.attributes, self.tok_interface, self.tok_name, self.generic_parameters, self.members)
+
+
+@dataclass(unsafe_hash=True, frozen=True)
+class EnumAST(TypeDeclarationAST):
+    tok_enum: SyntaxToken
+    generic_parameters: Sequence[GenericParameterAST]
+
+    @property
+    def children(self) -> Sequence[SyntaxSymbol]:
+        return self._cleanup(self.attributes, self.tok_enum, self.tok_name, self.generic_parameters, self.members)
 
 
 @dataclass(unsafe_hash=True, frozen=True)
@@ -681,6 +740,20 @@ class ReturnStatementAST(StatementAST):
 
 
 @dataclass(unsafe_hash=True, frozen=True)
+class YieldStatementAST(StatementAST):
+    tok_yield: SyntaxToken
+    value: Optional[ExpressionAST] = None
+
+    @property
+    def children(self) -> Sequence[SyntaxSymbol]:
+        return self._cleanup(self.tok_yield, self.value)
+
+    @property
+    def location(self) -> Location:
+        return self.tok_yield.location
+
+
+@dataclass(unsafe_hash=True, frozen=True)
 class ConditionStatementAST(StatementAST):
     tok_if: SyntaxToken
     condition: ExpressionAST
@@ -720,6 +793,33 @@ class WhileStatementAST(StatementAST):
     def children(self) -> Sequence[SyntaxSymbol]:
         return self._cleanup(self.tok_while,
                              self.condition,
+                             self.tok_colon,
+                             self.tok_newline,
+                             self.then_statement,
+                             self.else_statement)
+
+
+@dataclass(unsafe_hash=True, frozen=True)
+class ForStatementAST(StatementAST):
+    tok_for: SyntaxToken
+    target: ExpressionAST
+    tok_in: SyntaxToken
+    source: ExpressionAST
+    tok_colon: SyntaxToken
+    tok_newline: SyntaxToken
+    then_statement: StatementAST
+    else_statement: Optional[StatementAST]
+
+    @property
+    def location(self) -> Location:
+        return self.tok_for.location
+
+    @property
+    def children(self) -> Sequence[SyntaxSymbol]:
+        return self._cleanup(self.tok_for,
+                             self.target,
+                             self.tok_in,
+                             self.source,
                              self.tok_colon,
                              self.tok_newline,
                              self.then_statement,
@@ -778,6 +878,23 @@ class IntegerExpressionAST(ExpressionAST):
 
 
 @dataclass(unsafe_hash=True, frozen=True)
+class StringExpressionAST(ExpressionAST):
+    tok_string: SyntaxToken
+
+    @property
+    def value(self) -> str:
+        return self.tok_string.value[1:-1]
+
+    @property
+    def location(self) -> Location:
+        return self.tok_string.location
+
+    @property
+    def children(self) -> Sequence[SyntaxSymbol]:
+        return [self.tok_string]
+
+
+@dataclass(unsafe_hash=True, frozen=True)
 class NamedExpressionAST(ExpressionAST):
     tok_name: SyntaxToken
 
@@ -825,6 +942,15 @@ class BinaryID(enum.IntEnum):
     Div = enum.auto()
     DoubleDiv = enum.auto()
     Pow = enum.auto()
+    And = enum.auto()
+    Or = enum.auto()
+    Xor = enum.auto()
+    EqEqual = enum.auto()
+    NotEqual = enum.auto()
+    Less = enum.auto()
+    LessEqual = enum.auto()
+    Great = enum.auto()
+    GreatEqual = enum.auto()
 
 
 @dataclass(unsafe_hash=True, frozen=True)
@@ -892,3 +1018,16 @@ class AttributeExpressionAST(ExpressionAST):
     @property
     def children(self) -> Sequence[SyntaxSymbol]:
         return [self.value, self.tok_dot, self.tok_name]
+
+
+@dataclass(unsafe_hash=True, frozen=True)
+class TupleExpressionAST(ExpressionAST):
+    arguments: Sequence[ExpressionAST]
+
+    @property
+    def children(self) -> Sequence[SyntaxSymbol]:
+        return [self.arguments]
+
+    @property
+    def location(self) -> Location:
+        return cast(SyntaxCollection, self.arguments).location

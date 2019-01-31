@@ -1,0 +1,14 @@
+[[native]]
+class UnsafeBuffer[T]:
+    # UnsafeBuffer - instance of this class is represented native unsafe buffer for abstract data structures.
+    #
+    # UnsafeBuffer is initialized with `empty` values and can be GC-aware.
+
+    # Return item by it's index
+    def __getitem__(self, index: int) -> T: ...
+
+    # Change item by it's index
+    def __setitem__(self, index: int, item: T): ...
+
+    # Resize buffer to length
+    def resize(self, length: int): ...

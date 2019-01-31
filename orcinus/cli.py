@@ -188,4 +188,4 @@ def main():
         return action(**kwargs)
     else:
         parser.print_usage()
-        parser.exit(2)
+        return 2

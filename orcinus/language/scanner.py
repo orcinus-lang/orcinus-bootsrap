@@ -6,9 +6,9 @@ from __future__ import annotations
 
 import collections
 import re
-from typing import Iterator
+from typing import Iterator, Optional
 
-from orcinus.core.diagnostics import DiagnosticSeverity, Diagnostic, DiagnosticManager
+from orcinus.core.diagnostics import DiagnosticManager
 from orcinus.core.locations import Location
 from orcinus.language.syntax import SyntaxToken, TokenID
 
@@ -29,7 +29,13 @@ class Scanner:
         (r',', TokenID.Comma),
         (r':', TokenID.Colon),
         (r';', TokenID.Semicolon),
-        (r'=', TokenID.Equals),
+        (r'==', TokenID.EqEqual),
+        (r'!=', TokenID.NotEqual),
+        (r'<=', TokenID.LessEqual),
+        (r'>=', TokenID.GreatEqual),
+        (r'<', TokenID.Less),
+        (r'=', TokenID.Equal),
+        (r'>', TokenID.Great),
         (r'\*\*', TokenID.DoubleStar),
         (r'\*', TokenID.Star),
         (r'\+', TokenID.Plus),
@@ -38,13 +44,19 @@ class Scanner:
         (r'\/\/', TokenID.DoubleSlash),
         (r'\/', TokenID.Slash),
         (r'\~', TokenID.Tilde),
+        (r'\&', TokenID.And),
+        (r'\^', TokenID.Xor),
+        (r'\|', TokenID.Or),
         (r'\n', TokenID.NewLine),
+        (r'\r\n', TokenID.NewLine),
+        (r'\'.*\'', TokenID.String),  # TODO: Check string
+        (r'\".*\"', TokenID.String),  # TODO: Check string
         (r'\r\n', TokenID.NewLine),
         (r'#[^\r\n]*', TokenID.Comment),
         (r'[ \t]+', TokenID.Whitespace),
     ]
 
-    # This dictionary contains all keywords
+    # This dictionary contains all name that must treat as keywords
     KEYWORDS = {
         'def': TokenID.Def,
         'pass': TokenID.Pass,
@@ -52,16 +64,20 @@ class Scanner:
         'from': TokenID.From,
         'as': TokenID.As,
         'return': TokenID.Return,
+        'yield': TokenID.Yield,
         'if': TokenID.If,
         'elif': TokenID.Elif,
         'else': TokenID.Else,
         'while': TokenID.While,
         'struct': TokenID.Struct,
         'class': TokenID.Class,
+        'interface': TokenID.Interface,
+        'enum': TokenID.Enum,
+        'and': TokenID.LogicAnd,
+        'or': TokenID.LogicOr,
+        'for': TokenID.For,
+        'in': TokenID.In,
     }
-
-    # Final tuple contains all patterns
-    TOKENS = tuple([(re.escape(keyword), token_id) for keyword, token_id in KEYWORDS.items()] + TOKENS)
 
     # This tuple contains all trivia tokens.
     TRIVIA_TOKENS = (TokenID.Whitespace, TokenID.Comment)
@@ -156,21 +172,28 @@ class Scanner:
 
     def tokenize_all(self) -> Iterator[SyntaxToken]:
         while self.index < self.length:
-            yield self.__match()
+            token = self.__match()
+            if token:
+                yield token
+
         yield SyntaxToken(TokenID.EndFile, "", self.location)
 
-    def __match(self):
+    def __match(self) -> Optional[SyntaxToken]:
         self.location.columns(1)
         self.location = self.location.step()
 
         # other tokens
         match = self.regex_pattern.match(self.buffer, self.index)
         if not match:
-            raise Diagnostic(self.location, DiagnosticSeverity.Error, "Unknown symbol")
+            self.index += 1
+            self.diagnostics.error(self.location, "Unknown symbol")
+            return None
 
         group_name = match.lastgroup
-        symbol_id = self.regex_groups[group_name]
         value = match.group(group_name)
+        symbol_id = self.regex_groups[group_name]
+        if symbol_id == TokenID.Name:
+            symbol_id = self.KEYWORDS.get(value, symbol_id)
         self.index += len(value)
         location = self.__consume_location(value)
         return SyntaxToken(symbol_id, value, location)

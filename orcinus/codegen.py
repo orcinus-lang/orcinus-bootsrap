@@ -4,39 +4,15 @@
 # of the MIT license.  See the LICENSE file for details.
 from __future__ import annotations
 
-from typing import Sequence, Mapping
+from typing import Mapping
 
 from llvmlite import binding
 from llvmlite import ir
 from multidict import MultiDict
 
+from orcinus.collections import LazyDict
 from orcinus.language.semantic import *
 from orcinus.utils import cached_property
-
-
-class LazyDict(dict):
-    def __init__(self, seq=None, *, builder, initializer=None, **kwargs):
-        super().__init__(seq or (), **kwargs)
-        self.__builder = builder
-        self.__initializer = initializer or (lambda x: None)
-
-    def __getitem__(self, item):
-        try:
-            return super().__getitem__(item)
-        except KeyError:
-            value = self.__builder(item)
-            if value is None:
-                raise KeyError(item)
-            self[item] = value
-            self.__initializer(item)
-            return value
-
-    def __contains__(self, item):
-        try:
-            self[item]
-        except KeyError:
-            return False
-        return True
 
 
 class ModuleCodegen:
@@ -49,8 +25,8 @@ class ModuleCodegen:
         self.functions = MultiDict()
 
         # symbol to llvm
-        self.llvm_types = LazyDict(builder=self.declare_type, initializer=self.initialize_type)
-        self.llvm_functions = LazyDict(builder=self.declare_function)
+        self.llvm_types = LazyDict(constructor=self.declare_type, initializer=self.initialize_type)
+        self.llvm_functions = LazyDict(constructor=self.declare_function)
 
         # builtins functions
         self.context = context

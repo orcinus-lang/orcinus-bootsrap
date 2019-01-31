@@ -5,25 +5,47 @@
 from __future__ import annotations
 
 import heapq
+import itertools
 import logging
 from contextlib import contextmanager
-from typing import Tuple
+from typing import Tuple, Iterable, Mapping
 
+from multidict import MultiDict
 from multimethod import multimethod
 
+from orcinus.collections import LazyDict, LazyEmptyDict
 from orcinus.core.diagnostics import DiagnosticSeverity, Diagnostic, DiagnosticManager
 from orcinus.exceptions import OrcinusError
 from orcinus.language.syntax import *
+from orcinus.signals import Signal
 from orcinus.utils import cached_property
 
 logger = logging.getLogger('orcinus')
 
 
 class LexicalScope:
-    def __init__(self, parent: LexicalScope = None):
+    def __init__(self, name: str, *, model: SemanticModel = None, parent: LexicalScope = None, location: Location):
+        if not model and not parent:
+            raise RuntimeError('Required model or parent')
+        elif not model:
+            model = parent.model
+
+        self.__name = name
+        self.__location = location
+        self.__model = weakref.ref(model)
         self.__parent = parent
-        self.__defined = dict()  # Defined symbols
+
+        self.__defined = MultiDict()  # Defined symbols
+        self.__imported = dict()  # Imported symbols
         self.__resolved = dict()  # Resolved symbols
+
+    @property
+    def name(self) -> str:
+        return self.__name
+
+    @property
+    def model(self) -> SemanticModel:
+        return self.__model()
 
     @property
     def parent(self) -> LexicalScope:
@@ -45,43 +67,60 @@ class LexicalScope:
             return self.__resolved[name]
 
         # Resolve symbol in current scope
-        symbol = self.__defined.get(name)
-        if symbol:
-            if self.parent and isinstance(symbol, Overload):
-                parent_symbol = self.parent.resolve(name)
-                if isinstance(parent_symbol, Overload):
-                    symbol.extend(parent_symbol)
+        symbol = None
+        symbols = [self.model.symbols[node] for node in self.__defined.getall(name, ())]
+        is_populate = False
+
+        # Found single symbol: import overload function
+        if len(symbols) == 1:
+            symbol = symbols[0]
+
+        # Found multiple symbols: import overload function
+        elif symbols:
+            is_other = any(not isinstance(symbol, Function) for symbol in symbols)
+            if is_other:
+                for symbol in symbols:
+                    self.model.diagnostics.error(symbol.location, f"Already declared symbol `{symbol.name}`")
+
+            is_populate = True
+            symbol = Overload(name, (symbol for symbol in symbols if isinstance(symbol, Function)))
 
         # Resolve symbol in parent scope
         elif self.parent:
+            is_populate = False
             symbol = self.parent.resolve(name)
+            if isinstance(symbol, Overload):
+                symbol = Overload(name, symbol.functions)
+
+        # Import nodes from root scope
+        elif name in self.__imported:
+            symbol = self.__imported[name]
 
         # Return None, if symbol is not found in current and ascendant scopes
         if not symbol:
             return None
 
-        # Clone overload
-        if isinstance(symbol, Overload):
-            overload = Overload(name, symbol.functions[0])
-            overload.extend(overload)
-            symbol = overload
+        # Populate overload from parent scopes
+        elif is_populate and isinstance(symbol, Overload):
+            overload = self.parent.resolve(name)
+            if isinstance(overload, Overload):
+                symbol.extend(overload)
 
         # Save resolved symbol
         self.__resolved[name] = symbol
         return symbol
 
-    def append(self, symbol: NamedSymbol, name: str = None) -> None:
-        if isinstance(symbol, ErrorSymbol):
-            breakpoint()
-        name = name or symbol.name
-        try:
-            existed_symbol = self.__defined[name]
-        except KeyError:
-            self.__defined[name] = Overload(name, symbol) if isinstance(symbol, Function) else symbol
-        else:
-            if not isinstance(existed_symbol, Overload) or not isinstance(symbol, Function):
-                raise Diagnostic(symbol.location, DiagnosticSeverity.Error, f"Already defined symbol with name {name}")
-            existed_symbol.append(symbol)
+    def define(self, name: str, node: SyntaxNode):
+        self.__defined[name] = node  # Define symbols
+
+    def __str__(self):
+        if self.parent:
+            return f'{self.parent} -> {self.name}'
+        return self.name
+
+    def __repr__(self):
+        class_name = type(self).__name__
+        return f'<{class_name}: {self}>'
 
 
 class SemanticContext:
@@ -100,19 +139,19 @@ class SemanticContext:
 
     @cached_property
     def boolean_type(self) -> BooleanType:
-        return cast(BooleanType, self.builtins_module.scope.resolve('bool'))
+        return cast(BooleanType, self.builtins_module.scope['bool'])
 
     @cached_property
     def integer_type(self) -> IntegerType:
-        return cast(IntegerType, self.builtins_module.scope.resolve('int'))
+        return cast(IntegerType, self.builtins_module.scope['int'])
 
     @cached_property
     def void_type(self) -> VoidType:
-        return cast(VoidType, self.builtins_module.scope.resolve('void'))
+        return cast(VoidType, self.builtins_module.scope['void'])
 
     @cached_property
     def string_type(self) -> StringType:
-        return cast(StringType, self.builtins_module.scope.resolve('str'))
+        return cast(StringType, self.builtins_module.scope['str'])
 
     def open(self, document: Document) -> SemanticModel:
         """ Open module from file """
@@ -136,8 +175,10 @@ class SemanticModel:
         self.context = context
         self.module_name = module_name
         self.tree = tree
-        self.symbols = {}
-        self.scopes = {}
+
+        self.scopes = LazyDict(constructor=self.annotate_scope, initializer=self.initialize_scope)
+        self.symbols = LazyEmptyDict(constructor=self.annotate_symbol, initializer=self.initialize_symbol)
+        self.types = LazyEmptyDict(constructor=self.resolve_type)
 
         self.__functions = collections.deque()
 
@@ -156,48 +197,47 @@ class SemanticModel:
         return self.__functions[0]
 
     def analyze(self):
-        self.annotate_recursive_scope(self.tree)
         self.import_symbols(self.tree)
-        self.declare_symbol(self.tree, None)
+        self.define_symbols(self.tree)
         self.emit_functions(self.tree)
 
-    def annotate_recursive_scope(self, node: SyntaxNode, parent=None):
-        scope = self.scopes.get(node) or self.annotate_scope(node, parent)
-        self.scopes[node] = scope
+    def initialize_scope(self, node: SyntaxNode):
+        """ Recursive initialize scope for node """
         for child in node:
-            self.annotate_recursive_scope(child, scope)
+            self.scopes.get(child)
 
     @multimethod
-    def annotate_scope(self, _: SyntaxNode, parent: LexicalScope) -> LexicalScope:
-        return parent
+    def annotate_scope(self, node: SyntaxNode) -> LexicalScope:
+        return self.scopes[node.parent]
 
     @multimethod
-    def annotate_scope(self, _1: ModuleAST, _2=None) -> LexicalScope:
-        return LexicalScope()
+    def annotate_scope(self, node: ModuleAST) -> LexicalScope:
+        return LexicalScope(name=self.module_name, model=self, location=node.location)
 
     @multimethod
-    def annotate_scope(self, _: FunctionAST, parent: LexicalScope) -> LexicalScope:
-        return LexicalScope(parent)
+    def annotate_scope(self, node: FunctionAST) -> LexicalScope:
+        return LexicalScope(name=node.name, parent=self.scopes[node.parent], location=node.location)
 
     @multimethod
-    def annotate_scope(self, _: BlockStatementAST, parent: LexicalScope) -> LexicalScope:
-        return LexicalScope(parent)
+    def annotate_scope(self, node: BlockStatementAST) -> LexicalScope:
+        name = f'block#{node.location.begin.line}'
+        return LexicalScope(name=name, parent=self.scopes[node.parent], location=node.location)
 
     @multimethod
-    def annotate_scope(self, _: ClassAST, parent: LexicalScope) -> LexicalScope:
-        return LexicalScope(parent)
+    def annotate_scope(self, node: ClassAST) -> LexicalScope:
+        return LexicalScope(name=node.name, parent=self.scopes[node.parent], location=node.location)
 
     @multimethod
-    def annotate_scope(self, _: StructAST, parent: LexicalScope) -> LexicalScope:
-        return LexicalScope(parent)
+    def annotate_scope(self, node: StructAST) -> LexicalScope:
+        return LexicalScope(name=node.name, parent=self.scopes[node.parent], location=node.location)
 
     @multimethod
-    def annotate_scope(self, _: InterfaceAST, parent: LexicalScope) -> LexicalScope:
-        return LexicalScope(parent)
+    def annotate_scope(self, node: InterfaceAST) -> LexicalScope:
+        return LexicalScope(name=node.name, parent=self.scopes[node.parent], location=node.location)
 
     @multimethod
-    def annotate_scope(self, _: EnumAST, parent: LexicalScope) -> LexicalScope:
-        return LexicalScope(parent)
+    def annotate_scope(self, node: EnumAST) -> LexicalScope:
+        return LexicalScope(self.scopes[node.parent])
 
     def import_symbols(self, node: ModuleAST):
         """ Import symbols from imported scopes """
@@ -211,7 +251,7 @@ class SemanticModel:
                 module = imported_model.module
 
                 for alias in child.aliases:
-                    symbol = module.scope.resolve(alias.name)
+                    symbol = module.scope.get(alias.name)
                     if not symbol:
                         self.diagnostics.error(
                             alias.location, f"Not found symbol ‘{alias.name}’ in module ‘{child.module}’")
@@ -220,38 +260,33 @@ class SemanticModel:
             else:
                 self.diagnostics.error(node.location, "Not implemented symbol importing")
 
-    def declare_symbol(self, node: SyntaxNode, scope: LexicalScope = None, parent: ContainerSymbol = None):
-        symbol = self.annotate_symbol(node, parent)
-        if not symbol:
-            return None
+    def define_symbols(self, node: SyntaxNode):
+        if node.parent:
+            scope = self.scopes[node.parent]
+            self.define_symbol(scope, node)
 
-        # Declare symbol in parent scope
-        self.symbols[node] = symbol
-        if isinstance(symbol, NamedSymbol):
-            if scope is not None:
-                scope.append(symbol)
-            if isinstance(parent, ContainerSymbol):
-                parent.add_member(symbol)
+        for child in node:
+            self.define_symbols(child)
 
-        types = []
-        functions = []
-        others = []
+    @multimethod
+    def define_symbol(self, scope: LexicalScope, node: SyntaxNode):
+        pass  # skip node
 
-        # Collect types
-        if hasattr(node, 'members'):
-            for child in node.members:
-                if isinstance(child, TypeDeclarationAST):
-                    types.append(child)
-                elif isinstance(child, FunctionAST):
-                    functions.append(child)
-                else:
-                    others.append(child)
+    @multimethod
+    def define_symbol(self, scope: LexicalScope, node: FunctionAST):
+        scope.define(node.name, node)
 
-        child_scope = self.scopes[node]
-        for child in itertools.chain(types, functions, others):
-            self.declare_symbol(child, child_scope, symbol)
+    @multimethod
+    def define_symbol(self, scope: LexicalScope, node: TypeDeclarationAST):
+        scope.define(node.name, node)
 
-        return symbol
+    @multimethod
+    def define_symbol(self, scope: LexicalScope, node: GenericParameterAST):
+        scope.define(node.name, node)
+
+    @multimethod
+    def define_symbol(self, scope: LexicalScope, node: ParameterAST):
+        scope.define(node.name, node)
 
     @multimethod
     def resolve_type(self, node: TypeAST) -> Type:
@@ -270,67 +305,53 @@ class SemanticModel:
         symbol = self.scopes[node].resolve(node.name)
         if isinstance(symbol, Type):
             return symbol
+        elif symbol is None:
+            self.diagnostics.error(node.location, f"Type `{node.name}` is not founded in current scope")
+        else:
+            self.diagnostics.error(node.location,
+                                   f"Symbol `{node.name}` is founded in current scope, but it's not type")
 
-        self.diagnostics.error(node.location, f"Not found symbol `{node.name} in current scope`")
         return ErrorType(self.module, node.location)
 
     @multimethod
     def resolve_type(self, node: ParameterizedTypeAST) -> Type:
-        instance_type = self.resolve_type(node.type)
-        arguments = [self.resolve_type(arg) for arg in node.arguments]
+        instance_type = self.types[node.type]
+        arguments = [self.types[arg] for arg in node.arguments]
         return instance_type.instantiate(self.module, arguments, node.location)
 
-    def annotate_attributes(self, scope: LexicalScope, attributes: Sequence[AttributeAST]) -> Sequence[Attribute]:
-        result = []
-        for node in attributes:
-            result.append(
-                Attribute(node.name, [self.emit_value(arg) for arg in node.arguments], node.location)
-            )
-        return result
+    def annotate_attributes(self, attributes: Sequence[AttributeAST]) -> Sequence[Attribute]:
+        return [self.symbols[attrib] for attrib in attributes]
 
-    def annotate_generics(self, scope: LexicalScope, generic_parameters: Sequence[GenericParameterAST]):
-        parameters = []
-        for generic_node in generic_parameters:
-            generic = self.annotate_generics(generic_node)
-
-            scope.append(generic)
-            parameters.append(generic)
-
-        return parameters
+    def annotate_generics(self, parameters: Sequence[GenericParameterAST]) -> Sequence[GenericParameter]:
+        return [self.symbols[generic_node] for generic_node in parameters]
 
     @multimethod
-    def annotate_symbol(self, node: SyntaxNode, parent: ContainerSymbol) -> Symbol:
-        self.diagnostics.error(node.location, "Not implemented member declaration")
-        return ErrorSymbol(self.module, node.location)
-
-    # noinspection PyUnusedLocal
-    @multimethod
-    def annotate_symbol(self, node: ModuleAST, parent=None) -> Module:
-        return Module(self.context, self.module_name, Location(node.location.filename))
-
-    @multimethod
-    def annotate_symbol(self, node: PassMemberAST, parent: ContainerSymbol) -> Optional[Symbol]:
+    def annotate_symbol(self, _: SyntaxNode) -> None:
         return None
 
     @multimethod
-    def annotate_symbol(self, node: FunctionAST, parent: ContainerSymbol) -> Function:
-        scope = self.scopes[node]
-        generic_parameters = self.annotate_generics(scope, node.generic_parameters)
-        attributes = self.annotate_attributes(scope, node.attributes)
+    def annotate_symbol(self, node: ModuleAST) -> Module:
+        return Module(self.context, self.module_name, Location(node.location.filename))
+
+    @multimethod
+    def annotate_symbol(self, node: FunctionAST) -> Function:
+        parent = self.symbols[node.parent]
+        generic_parameters = self.annotate_generics(node.generic_parameters)
+        attributes = self.annotate_attributes(node.attributes)
 
         # if function is method of struct/class/interface and first arguments type is auto, then it type can
         # be inferred to owner type
         if isinstance(parent, Type) and node.parameters and isinstance(node.parameters[0].type, AutoTypeAST):
             parameters = [parent]
-            parameters.extend(self.resolve_type(param.type) for param in node.parameters[1:])
+            parameters.extend(self.types[param.type] for param in node.parameters[1:])
         else:
-            parameters = [self.resolve_type(param.type) for param in node.parameters]
+            parameters = [self.types[param.type] for param in node.parameters]
 
         # if return type of function is auto it can be inferred to void
         if isinstance(node.return_type, AutoTypeAST):
             return_type = self.context.void_type
         else:
-            return_type = self.resolve_type(node.return_type)
+            return_type = self.types[node.return_type]
 
         func_type = FunctionType(self.module, parameters, return_type, node.location)
         func = Function(
@@ -341,12 +362,12 @@ class SemanticModel:
             func_param.location = node_param.location
 
             self.symbols[node_param] = func_param
-            scope.append(func_param)
-
         return func
 
     @multimethod
-    def annotate_symbol(self, node: StructAST, parent: ContainerSymbol) -> Type:
+    def annotate_symbol(self, node: StructAST) -> Type:
+        parent = self.symbols[node.parent]
+
         if self.module == self.context.builtins_module:
             if node.name == "int":
                 return IntegerType(parent, node.location)
@@ -355,35 +376,72 @@ class SemanticModel:
             elif node.name == "void":
                 return VoidType(parent, node.location)
 
-        generic_parameters = self.annotate_generics(self.scopes[node], node.generic_parameters)
-        return StructType(parent, node.name, node.location, generic_parameters=generic_parameters)
+        attributes = self.annotate_attributes(node.attributes)
+        generic_parameters = self.annotate_generics(node.generic_parameters)
+        return StructType(parent, node.name, node.location, generic_parameters=generic_parameters,
+                          attributes=attributes)
 
     @multimethod
-    def annotate_symbol(self, node: ClassAST, parent: ContainerSymbol) -> Type:
+    def annotate_symbol(self, node: ClassAST) -> Type:
+        parent = self.symbols[node.parent]
+
         if self.module == self.context.builtins_module:
             if node.name == "str":
                 return StringType(parent, node.location)
 
-        generic_parameters = self.annotate_generics(self.scopes[node], node.generic_parameters)
-        return ClassType(parent, node.name, node.location, generic_parameters=generic_parameters)
+        attributes = self.annotate_attributes(node.attributes)
+        generic_parameters = self.annotate_generics(node.generic_parameters)
+        return ClassType(parent, node.name, node.location, generic_parameters=generic_parameters, attributes=attributes)
 
     @multimethod
-    def annotate_symbol(self, node: InterfaceAST, parent: ContainerSymbol) -> Type:
-        generic_parameters = self.annotate_generics(self.scopes[node], node.generic_parameters)
-        return InterfaceType(parent, node.name, node.location, generic_parameters=generic_parameters)
+    def annotate_symbol(self, node: InterfaceAST) -> Type:
+        parent = self.symbols[node.parent]
+
+        attributes = self.annotate_attributes(node.attributes)
+        generic_parameters = self.annotate_generics(node.generic_parameters)
+        return InterfaceType(parent, node.name, node.location, generic_parameters=generic_parameters,
+                             attributes=attributes)
 
     @multimethod
-    def annotate_symbol(self, node: GenericParameterAST, parent: ContainerSymbol) -> GenericType:
+    def annotate_symbol(self, node: GenericParameterAST) -> GenericType:
         return GenericType(self.module, node.name, node.location)
 
     @multimethod
-    def annotate_symbol(self, node: FieldAST, parent: ContainerSymbol) -> Symbol:
+    def annotate_symbol(self, node: FieldAST) -> Symbol:
+        parent = self.symbols[node.parent]
+
         if not isinstance(parent, Type):
             self.diagnostics.error(node.location, "Field member must be declared in type")
             return ErrorSymbol(self.module, node.location)
 
-        field_type = self.resolve_type(node.type)
+        field_type = self.types[node.type]
         return Field(cast(Type, parent), node.name, field_type, node.location)
+
+    @multimethod
+    def initialize_symbol(self, node: SyntaxNode):
+        pass
+
+    @multimethod
+    def initialize_symbol(self, node: ModuleAST):
+        module = self.symbols[node]
+        for member in node.members:
+            symbol = self.symbols[member]
+            if member:
+                module.add_member(symbol)
+
+    @multimethod
+    def initialize_symbol(self, node: GenericParameterAST):
+        generic_type: GenericType = self.symbols[node]
+        concepts = [self.types[child] for child in node.concepts]
+        generic_type.configure(concepts)
+
+    @multimethod
+    def initialize_symbol(self, node: TypeDeclarationAST):
+        type_symbol = self.symbols[node]
+        for member in node.members:
+            symbol = self.symbols[member]
+            if member:
+                type_symbol.add_member(symbol)
 
     def emit_functions(self, module: ModuleAST):
         for member in module.members:
@@ -405,7 +463,7 @@ class SemanticModel:
             functions.extend(symbol.functions)
 
         # type function
-        symbol = self_type.scope.resolve(name) if self_type else None
+        symbol = self_type.scope.get(name) if self_type else None
         if isinstance(symbol, Overload):
             functions.extend(symbol.functions)
 
@@ -1172,15 +1230,16 @@ class MangledSymbol(OwnedSymbol, abc.ABC):
         raise NotImplementedError
 
 
-class ContainerSymbol(Symbol, abc.ABC):
+class ContainerSymbol(NamedSymbol, abc.ABC):
     """ Abstract base for container symbols """
 
     def __init__(self):
         self.__members = []
-        self.__scope = LexicalScope()
+        self.__scope = {}
+        self.on_add_member = Signal()
 
     @property
-    def scope(self) -> LexicalScope:
+    def scope(self) -> Mapping[str, NamedSymbol]:
         return self.__scope
 
     @property
@@ -1189,7 +1248,18 @@ class ContainerSymbol(Symbol, abc.ABC):
 
     def add_member(self, symbol: OwnedSymbol):
         self.__members.append(symbol)
-        self.__scope.append(symbol)
+
+        if isinstance(symbol, Function):
+            if symbol.name in self.__scope:
+                owned = self.__scope[symbol.name]
+                if isinstance(owned, Overload):
+                    owned.append(symbol)
+            else:
+                self.__scope[symbol.name] = symbol
+        else:
+            self.__scope[symbol.name] = symbol
+
+        self.on_add_member(symbol)
 
 
 class GenericSymbol(NamedSymbol, abc.ABC):
@@ -1294,7 +1364,7 @@ class Attribute(NamedSymbol):
         return self.__arguments
 
 
-class Module(NamedSymbol, ContainerSymbol):
+class Module(ContainerSymbol):
     def __init__(self, context: SemanticContext, name, location: Location):
         super(Module, self).__init__()
 
@@ -1333,15 +1403,20 @@ class Type(MangledSymbol, GenericSymbol, OwnedSymbol, ContainerSymbol, abc.ABC):
     """ Abstract base for all types """
 
     def __init__(self, owner: ContainerSymbol, name: str, location: Location, *,
-                 generic_parameters=None, generic_arguments=None, definition=None):
+                 attributes=None, generic_parameters=None, generic_arguments=None, definition=None):
         super(Type, self).__init__()
 
         self.__owner = owner
         self.__name = name
         self.__location = location
+        self.__attributes = tuple(attributes or [])
         self.__generic_parameters = tuple(generic_parameters or [])
         self.__generic_arguments = tuple(generic_arguments or [])
         self.__definition = definition
+
+    @property
+    def attributes(self) -> Sequence[Attribute]:
+        return self.__attributes
 
     @property
     def owner(self) -> ContainerSymbol:
@@ -1521,6 +1596,25 @@ class GenericType(GenericParameter, Type):
         assert not self.__concepts
         self.__concepts = concepts
 
+        for concept in concepts:
+            concept.on_add_member.connect(self.clone_member, True)
+
+    @multimethod
+    def clone_member(self, member: Function):
+        parameters = [self] + list(member.function_type.parameters[1:])
+        function_type = FunctionType(self.owner, parameters, member.function_type.return_type,
+                                     location=member.function_type.location)
+        func = Function(self,
+                        member.name,
+                        function_type,
+                        location=member.location,
+                        generic_arguments=member.generic_arguments,
+                        generic_parameters=member.generic_parameters,
+                        attributes=member.attributes
+                        )
+
+        self.add_member(func)
+
 
 class ErrorValue(Value):
     """ Instance of this class is represented errors in semantic analyze """
@@ -1613,7 +1707,7 @@ class Function(MangledSymbol, GenericSymbol, OwnedSymbol, Value):
         if native_attr:
             if len(native_attr.arguments) == 1:
                 assert isinstance(native_attr.arguments[0], StringConstant)
-                return native_attr.arguments[0].value
+                return cast(StringConstant, native_attr.arguments[0]).value
             return self.name
 
     @cached_property
@@ -1697,9 +1791,9 @@ class Function(MangledSymbol, GenericSymbol, OwnedSymbol, Value):
 
 
 class Overload(NamedSymbol):
-    def __init__(self, name: str, function: Function):
+    def __init__(self, name: str, functions: Iterable[Function]):
         self.__name = name
-        self.__functions = [function]
+        self.__functions = list(functions)
 
     @property
     def functions(self) -> Sequence[Function]:

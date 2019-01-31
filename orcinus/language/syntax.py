@@ -7,14 +7,32 @@ from __future__ import annotations
 import abc
 import collections
 import enum
-import itertools
 import weakref
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Sequence, Optional, Iterator, cast
 
 from orcinus.core.locations import Location
 from orcinus.core.locations import Position
 from orcinus.utils import cached_property
+
+
+class SyntaxContext:
+    def __init__(self):
+        self.__parents = {}
+
+    def set_parent(self, child: SyntaxNode, parent: SyntaxNode):
+        self.__parents[child] = parent
+
+    def get_parent(self, child: SyntaxNode) -> Optional[SyntaxNode]:
+        return self.__parents.get(child)
+
+    def propagate_parents(self, parent: SyntaxNode):
+        for child in parent.children:
+            if isinstance(child, SyntaxToken):
+                child.parent = parent
+            elif isinstance(child, SyntaxNode):
+                self.__parents[child] = parent
+                self.propagate_parents(child)
 
 
 class SyntaxSymbol(abc.ABC):
@@ -212,21 +230,17 @@ class SyntaxToken(SyntaxSymbol):
             return f'[{self.location}] {self.id.name}: `{value}`'
         return f'[{self.location}] {self.id.name}'
 
-    def _propagate_parents(self):
-        for child in itertools.chain(self.leading_trivia, self.trailing_trivia):
-            child.parent = self
 
-
+@dataclass(unsafe_hash=True, frozen=True)
 class SyntaxNode(SyntaxSymbol):
-    __parent = None
+    context: SyntaxContext = field(repr=False, compare=False, hash=False)
 
     @property
     def parent(self) -> Optional[SyntaxNode]:
-        return self.__parent() if self.__parent else None
-
-    @parent.setter
-    def parent(self, value: SyntaxNode):
-        self.__parent = weakref.ref(value) if value else None
+        parent = self.context.get_parent(self)
+        while isinstance(parent, SyntaxCollection):
+            parent = parent.parent
+        return parent
 
     @property
     @abc.abstractmethod
@@ -273,12 +287,7 @@ class SyntaxNode(SyntaxSymbol):
             return self
         return None
 
-    def propagate_parents(self):
-        for child in self.children:
-            child.parent = self
-            child.propagate_parents()
-
-    def __iter__(self) -> Iterator[SyntaxSymbol]:
+    def __iter__(self) -> Iterator[SyntaxNode]:
         return iter(self.nodes)
 
     def __str__(self) -> str:
@@ -289,7 +298,9 @@ class SyntaxNode(SyntaxSymbol):
 
 
 class SyntaxCollection(SyntaxNode, collections.abc.Sequence):
-    def __init__(self, children: Sequence[SyntaxSymbol] = None, location: Location = None):
+    def __init__(self, context: SyntaxContext, children: Sequence[SyntaxSymbol] = None, location: Location = None):
+        super(SyntaxCollection, self).__init__(context)
+
         if not children and not location:
             raise ValueError(u'Require children or location')
 
@@ -305,6 +316,11 @@ class SyntaxCollection(SyntaxNode, collections.abc.Sequence):
     @property
     def children(self) -> Sequence[SyntaxSymbol]:
         return self.__children
+
+    def __hash__(self):
+        if self.children:
+            return hash((id(self), self.children))
+        return hash(id(self))
 
     def __getitem__(self, i: int):
         return self.nodes[i]
@@ -476,8 +492,8 @@ class NamedTypeAST(TypeAST):
 class AutoTypeAST(TypeAST):
     __location: Location
 
-    def __init__(self, location: Location):
-        super(AutoTypeAST, self).__init__()
+    def __init__(self, context: SyntaxContext, location: Location):
+        super(AutoTypeAST, self).__init__(context)
 
         self.__location = location
 

@@ -56,7 +56,7 @@ class str:
 
     # Construct string from value
     [[inline]]
-    def __new__[T: String](value: T) -> str:
+    def __new__[T: ToString](value: T) -> str:
         return value.__str__()
 
     # Return count of unicode characters in string. It's

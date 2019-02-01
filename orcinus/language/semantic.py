@@ -8,7 +8,7 @@ import heapq
 import itertools
 import logging
 from contextlib import contextmanager
-from typing import Tuple, Iterable, Mapping
+from typing import Tuple, Iterable
 
 from multidict import MultiDict
 from multimethod import multimethod
@@ -23,7 +23,21 @@ from orcinus.utils import cached_property
 logger = logging.getLogger('orcinus')
 
 
-class LexicalScope:
+class Scope(abc.ABC):
+    @abc.abstractmethod
+    def resolve(self, name: str) -> Optional[NamedSymbol]:
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def insert(self, name: str, symbol: NamedSymbol):
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def define(self, name: str, node: SyntaxNode):
+        raise NotImplementedError
+
+
+class LexicalScope(Scope):
     def __init__(self, name: str, *, model: SemanticModel = None, parent: LexicalScope = None, location: Location):
         if not model and not parent:
             raise RuntimeError('Required model or parent')
@@ -74,6 +88,8 @@ class LexicalScope:
         # Found single symbol: import overload function
         if len(symbols) == 1:
             symbol = symbols[0]
+            if isinstance(symbol, Function):
+                symbol = Overload(name, [symbol])
 
         # Found multiple symbols: import overload function
         elif symbols:
@@ -94,6 +110,7 @@ class LexicalScope:
 
         # Import nodes from root scope
         elif name in self.__imported:
+            is_populate = False
             symbol = self.__imported[name]
 
         # Return None, if symbol is not found in current and ascendant scopes
@@ -106,9 +123,16 @@ class LexicalScope:
             if isinstance(overload, Overload):
                 symbol.extend(overload)
 
+            overload = self.__imported.get(name)
+            if isinstance(overload, Overload):
+                symbol.extend(overload)
+
         # Save resolved symbol
         self.__resolved[name] = symbol
         return symbol
+
+    def insert(self, name: str, symbol: NamedSymbol):
+        self.__imported[name] = symbol
 
     def define(self, name: str, node: SyntaxNode):
         self.__defined[name] = node  # Define symbols
@@ -121,6 +145,44 @@ class LexicalScope:
     def __repr__(self):
         class_name = type(self).__name__
         return f'<{class_name}: {self}>'
+
+
+class ContainerScope(Scope):
+    def __init__(self, owner: ContainerSymbol):
+        self.__owner = owner
+        self.__imported = dict()  # Imported symbols
+        self.__resolved = dict()  # Resolved symbols
+
+    @property
+    def owner(self):
+        return self.__owner
+
+    @cached_property
+    def model(self) -> SemanticModel:
+        return self.owner.model if isinstance(self.owner, Module) else self.owner.module.model
+
+    def resolve(self, name: str) -> Optional[NamedSymbol]:
+        if name in self.__resolved:
+            return self.__resolved[name]
+
+        if name in self.__imported:
+            return self.model.symbols[self.__imported[name]]
+
+        return None
+
+    def insert(self, name: str, symbol: NamedSymbol):
+        if isinstance(symbol, Function):
+            if symbol.name in self.__resolved:
+                owned = self.__resolved[symbol.name]
+                if isinstance(owned, Overload):
+                    owned.append(symbol)
+            else:
+                self.__resolved[symbol.name] = Overload(name, [symbol])
+        else:
+            self.__resolved[symbol.name] = symbol
+
+    def define(self, name: str, node: SyntaxNode):
+        self.__imported[name] = node
 
 
 class SemanticContext:
@@ -139,19 +201,27 @@ class SemanticContext:
 
     @cached_property
     def boolean_type(self) -> BooleanType:
-        return cast(BooleanType, self.builtins_module.scope['bool'])
+        type_symbol = self.builtins_module.scope.resolve('bool')
+        assert type_symbol, "Not found boolean type in builtins module"
+        return cast(BooleanType, type_symbol)
 
     @cached_property
     def integer_type(self) -> IntegerType:
-        return cast(IntegerType, self.builtins_module.scope['int'])
+        type_symbol = self.builtins_module.scope.resolve('int')
+        assert type_symbol, "Not found integer type in builtins module"
+        return cast(IntegerType, type_symbol)
 
     @cached_property
     def void_type(self) -> VoidType:
-        return cast(VoidType, self.builtins_module.scope['void'])
+        type_symbol = self.builtins_module.scope.resolve('void')
+        assert type_symbol, "Not found void type in builtins module"
+        return cast(VoidType, type_symbol)
 
     @cached_property
     def string_type(self) -> StringType:
-        return cast(StringType, self.builtins_module.scope['str'])
+        type_symbol = self.builtins_module.scope.resolve('str')
+        assert type_symbol, "Not found string type in builtins module"
+        return cast(StringType, type_symbol)
 
     def open(self, document: Document) -> SemanticModel:
         """ Open module from file """
@@ -331,7 +401,7 @@ class SemanticModel:
 
     @multimethod
     def annotate_symbol(self, node: ModuleAST) -> Module:
-        return Module(self.context, self.module_name, Location(node.location.filename))
+        return Module(self, self.module_name, Location(node.location.filename))
 
     @multimethod
     def annotate_symbol(self, node: FunctionAST) -> Function:
@@ -425,6 +495,10 @@ class SemanticModel:
     def initialize_symbol(self, node: ModuleAST):
         module = self.symbols[node]
         for member in node.members:
+            if getattr(member, 'name', None):
+                module.scope.define(member.name, member)
+
+        for member in node.members:
             symbol = self.symbols[member]
             if member:
                 module.add_member(symbol)
@@ -438,6 +512,10 @@ class SemanticModel:
     @multimethod
     def initialize_symbol(self, node: TypeDeclarationAST):
         type_symbol = self.symbols[node]
+        for member in node.members:
+            if getattr(member, 'name', None):
+                type_symbol.scope.define(member.name, member)
+
         for member in node.members:
             symbol = self.symbols[member]
             if member:
@@ -463,7 +541,7 @@ class SemanticModel:
             functions.extend(symbol.functions)
 
         # type function
-        symbol = self_type.scope.get(name) if self_type else None
+        symbol = self_type.scope.resolve(name) if self_type else None
         if isinstance(symbol, Overload):
             functions.extend(symbol.functions)
 
@@ -689,7 +767,7 @@ class SemanticModel:
         symbol = self.emit_symbol(node.value, False)
 
         # function call
-        if isinstance(symbol, Overload):
+        if isinstance(symbol, (Overload, Function)):
             func = self.resolve_function(self.scopes[node], symbol.name, arguments, node.location)
             if not func:
                 return ErrorValue(self.module, node.location)
@@ -851,6 +929,12 @@ class InstantiateContext:
         return result_type
 
     @multimethod
+    def instantiate(self, func: Function, location: Location) -> Function:
+        func_type = self.instantiate(func.type, location)
+        new_func = Function(self.module, func.name, func_type)
+        raise NotImplementedError
+
+    @multimethod
     def instantiate(self, field: Field, location: Location) -> Field:
         if field in self.__mapping:
             return self.__mapping[field]
@@ -895,6 +979,12 @@ class InstantiateContext:
     @multimethod
     def instantiate(self, value: Parameter, location: Location):
         return self.__mapping[value]
+
+    @multimethod
+    def instantiate(self, value: CallInstruction, location: Location):
+        arguments = [self.instantiate(arg, location) for arg in value.arguments]
+        func = self.instantiate(value.function, location)
+        return CallInstruction(func, arguments, func.location)
 
 
 class InferenceType(abc.ABC):
@@ -1230,16 +1320,16 @@ class MangledSymbol(OwnedSymbol, abc.ABC):
         raise NotImplementedError
 
 
-class ContainerSymbol(NamedSymbol, abc.ABC):
+class ContainerSymbol(abc.ABC):
     """ Abstract base for container symbols """
 
     def __init__(self):
         self.__members = []
-        self.__scope = {}
+        self.__scope = ContainerScope(self)
         self.on_add_member = Signal()
 
     @property
-    def scope(self) -> Mapping[str, NamedSymbol]:
+    def scope(self) -> ContainerScope:
         return self.__scope
 
     @property
@@ -1248,17 +1338,8 @@ class ContainerSymbol(NamedSymbol, abc.ABC):
 
     def add_member(self, symbol: OwnedSymbol):
         self.__members.append(symbol)
-
-        if isinstance(symbol, Function):
-            if symbol.name in self.__scope:
-                owned = self.__scope[symbol.name]
-                if isinstance(owned, Overload):
-                    owned.append(symbol)
-            else:
-                self.__scope[symbol.name] = symbol
-        else:
-            self.__scope[symbol.name] = symbol
-
+        if isinstance(symbol, NamedSymbol):
+            self.__scope.insert(symbol.name, symbol)
         self.on_add_member(symbol)
 
 
@@ -1364,16 +1445,20 @@ class Attribute(NamedSymbol):
         return self.__arguments
 
 
-class Module(ContainerSymbol):
-    def __init__(self, context: SemanticContext, name, location: Location):
+class Module(NamedSymbol, ContainerSymbol):
+    def __init__(self, model: SemanticModel, name, location: Location):
         super(Module, self).__init__()
 
-        self.__context = context
+        self.__model = model
         self.__name = name
         self.__location = location
         self.__instances = {}  # Map of all generic instances
         self.__functions = []
         self.__types = []
+
+    @property
+    def model(self) -> SemanticModel:
+        return self.__model
 
     @property
     def name(self) -> str:
@@ -1589,6 +1674,10 @@ class GenericType(GenericParameter, Type):
         self.__concepts = tuple()
 
     @property
+    def is_generic(self) -> bool:
+        return True
+
+    @property
     def concepts(self) -> Sequence[InterfaceType]:
         return self.__concepts
 
@@ -1598,6 +1687,12 @@ class GenericType(GenericParameter, Type):
 
         for concept in concepts:
             concept.on_add_member.connect(self.clone_member, True)
+            for member in concept.members:
+                self.clone_member(member)
+
+    @multimethod
+    def clone_member(self, member: Symbol):
+        raise NotImplementedError
 
     @multimethod
     def clone_member(self, member: Function):
@@ -1612,6 +1707,10 @@ class GenericType(GenericParameter, Type):
                         generic_parameters=member.generic_parameters,
                         attributes=member.attributes
                         )
+
+        for param, original in zip(func.parameters, member.parameters):
+            param.name = original.name
+            param.location = original.location
 
         self.add_member(func)
 

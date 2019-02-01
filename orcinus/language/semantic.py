@@ -930,6 +930,12 @@ class InstantiateContext:
 
     @multimethod
     def instantiate(self, func: Function, location: Location) -> Function:
+        if not func.is_generic:
+            return func
+
+        if func.generic_arguments:
+            generic_arguments =
+
         func_type = self.instantiate(func.type, location)
         new_func = Function(self.module, func.name, func_type)
         raise NotImplementedError

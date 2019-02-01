@@ -30,5 +30,13 @@ setup(
         'json-rpc == 1.11.1',
         'pytest==3.6.1',
     ],
+    extras_require={
+        'mkdocs': [
+            'mkdocs',
+            'mkdocs-material',
+            'markdown-checklist',
+            'pygments',
+        ]
+    },
     include_package_data=True,
 )

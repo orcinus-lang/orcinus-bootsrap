@@ -494,15 +494,15 @@ class SemanticModel:
         return Field(cast(Type, parent), node.name, field_type, node.location)
 
     @multimethod
-    def emit_symbol(self, node: IntegerExpressionAST) -> Symbol:
+    def annotate_symbol(self, node: IntegerExpressionAST) -> Symbol:
         return IntegerConstant(self.context.integer_type, node.value, node.location)
 
     @multimethod
-    def emit_symbol(self, node: StringExpressionAST) -> Symbol:
+    def annotate_symbol(self, node: StringExpressionAST) -> Symbol:
         return StringConstant(self.context.string_type, node.value, node.location)
 
     @multimethod
-    def emit_symbol(self, node: NamedExpressionAST) -> Symbol:
+    def annotate_symbol(self, node: NamedExpressionAST) -> Symbol:
         if node.name in ['True', 'False']:
             return BooleanConstant(self.context.boolean_type, node.name == 'True', node.location)
         elif node.name == 'void':
@@ -687,7 +687,7 @@ class SemanticModel:
         return_type = self.current_function.return_type
         void_type = self.context.void_type
 
-        if isinstance(return_type, ErrorType) or isinstance(value.type, ErrorType):
+        if isinstance(return_type, ErrorType) or value and isinstance(value.type, ErrorType):
             pass  # Skip error propagation
         elif value and value.type != return_type:
             message = f"Return statement value must have ‘{return_type}’ type, got ‘{value.type}’"
@@ -771,15 +771,15 @@ class SemanticModel:
 
     @multimethod
     def emit_value(self, node: IntegerExpressionAST) -> Value:
-        return cast(Value, self.emit_symbol(node, True))
+        return cast(Value, self.symbols[node])
 
     @multimethod
     def emit_value(self, node: StringExpressionAST) -> Value:
-        return cast(Value, self.emit_symbol(node, True))
+        return cast(Value, self.symbols[node])
 
     @multimethod
     def emit_value(self, node: NamedExpressionAST) -> Value:
-        value = self.emit_symbol(node, True)
+        value = self.symbols[node]
         if isinstance(value, Value):
             return value
 
@@ -787,7 +787,7 @@ class SemanticModel:
 
     @multimethod
     def emit_value(self, node: AttributeExpressionAST) -> Value:
-        value = self.emit_symbol(node, True)
+        value = self.symbols[node]
         if isinstance(value, Value):
             return value
 
@@ -1485,6 +1485,8 @@ class Attribute(NamedSymbol):
         self.__location = location
         self.__name = name
         self.__arguments = arguments
+
+        assert all(isinstance(arg, Value) for arg in arguments)
 
     @property
     def name(self) -> str:

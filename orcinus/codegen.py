@@ -15,6 +15,7 @@ from orcinus.utils import cached_property
 
 class ModuleCodegen:
     def __init__(self, context: SemanticContext, name='<stdin>'):
+        self.__module_ref = None
         self.llvm_module = ir.Module(name)
         self.llvm_module.triple = binding.Target.from_default_triple().triple
 
@@ -30,8 +31,18 @@ class ModuleCodegen:
         self.context = context
         self.builtins = BuiltinsCodegen(self)
 
+    def verify(self):
+        try:
+            self.__module_ref = binding.parse_assembly(str(self.llvm_module))
+            self.__module_ref.verify()
+        except RuntimeError as ex:
+            raise OrcinusError(str(ex))
+        else:
+            return self.__module_ref
+
     def __str__(self):
-        return str(self.llvm_module)
+        module = self.verify()
+        return str(module)
 
     @property
     def llvm_context(self) -> ir.Context:
@@ -75,6 +86,10 @@ class ModuleCodegen:
         return ir.IntType(32)
 
     @multimethod
+    def declare_type(self, _: StringType):
+        return ir.IntType(8).as_pointer()
+
+    @multimethod
     def declare_type(self, type_symbol: ClassType):
         """ class = pointer to struct { fields... } """
         llvm_struct = self.llvm_context.get_identified_type(type_symbol.mangled_name)
@@ -104,7 +119,7 @@ class ModuleCodegen:
 
     def emit(self, module: Module):
         for func in module.functions:
-            if not func.is_generic:
+            if func.statement and not func.is_generic:
                 self.emit_function(func)
 
     def emit_function(self, func: Function):
@@ -112,6 +127,7 @@ class ModuleCodegen:
         if func.statement:
             builder = FunctionCodegen(self, func, llvm_func)
             builder.emit_statement(func.statement)
+
         if func.name == 'main':
             self.emit_main(func)
         return llvm_func

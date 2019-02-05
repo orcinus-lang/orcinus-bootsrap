@@ -26,16 +26,13 @@ def find_scripts(path):
 TEST_FIXTURES = sorted(s for s in find_scripts('./tests'))
 
 
-def execute(command, *, input=None, is_binary=False, is_error=False):
+def execute(command, *, input=None, is_binary=False):
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE)
     stdout, stderr = process.communicate(input)
     if not is_binary:
         stdout, stderr = stdout.decode('utf-8').rstrip(), stderr.decode('utf-8').rstrip()
     if process.returncode:
         error = stderr if isinstance(stderr, str) else stderr.decode('utf-8')
-        sys.stderr.write(error)
-        if is_error:
-            raise RuntimeError(error)
         sys.stderr.write(error)
     return process.returncode, stdout, stderr
 
@@ -80,7 +77,7 @@ def compile_and_execute(filename, *, name, opt_level, arguments, input=None):
     flags.extend(get_build_options())
     flags.extend(['-'])
     flags.extend(arguments)
-    return (True,) + execute([LLI_EXECUTABLE, f'-O{opt_level}'] + flags, input=assembly, is_error=True)
+    return (True,) + execute([LLI_EXECUTABLE, f'-O{opt_level}'] + flags, input=assembly)
 
 
 def remove_startswith_and_strip(haystack: str, needle: str) -> str:

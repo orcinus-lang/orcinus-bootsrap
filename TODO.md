@@ -1,6 +1,11 @@
 Minimum viable product (MVP)
 ============================
 
+- [ ] Generics:
+    - [ ] Separate type checking
+    - [ ] Separate compilation
+    - [ ] Concepts
+
 - [ ] Language reference:
     - [ ] Condition statement (`if`):
         - [x] `if` ...

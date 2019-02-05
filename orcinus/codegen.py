@@ -8,9 +8,7 @@ from typing import Mapping
 
 from llvmlite import binding
 from llvmlite import ir
-from multidict import MultiDict
 
-from orcinus.collections import LazyDict
 from orcinus.language.semantic import *
 from orcinus.utils import cached_property
 
@@ -71,6 +69,10 @@ class ModuleCodegen:
     @multimethod
     def declare_type(self, _: IntegerType):
         return ir.IntType(64)
+
+    @multimethod
+    def declare_type(self, _: CharacterType):
+        return ir.IntType(32)
 
     @multimethod
     def declare_type(self, type_symbol: ClassType):
@@ -388,24 +390,24 @@ class BuiltinsCodegen:
         }
 
     @staticmethod
-    def int_pos(self: FunctionCodegen, func: Function, arguments: Sequence[Value], location: Location):
+    def int_pos(self: FunctionCodegen, _: Function, arguments: Sequence[Value], _1: Location):
         return self.emit_value(arguments[0])
 
     @staticmethod
-    def int_neg(self: FunctionCodegen, func: Function, arguments: Sequence[Value], location: Location):
+    def int_neg(self: FunctionCodegen, _: Function, arguments: Sequence[Value], _1: Location):
         return self.llvm_builder.neg(self.emit_value(arguments[0]))
 
     @staticmethod
-    def int_add(self: FunctionCodegen, func: Function, arguments: Sequence[Value], location: Location):
+    def int_add(self: FunctionCodegen, _: Function, arguments: Sequence[Value], _1: Location):
         llvm_args = (self.emit_value(arg) for arg in arguments)
         return self.llvm_builder.add(*llvm_args)
 
     @staticmethod
-    def int_sub(self: FunctionCodegen, func: Function, arguments: Sequence[Value], location: Location):
+    def int_sub(self: FunctionCodegen, _: Function, arguments: Sequence[Value], _1: Location):
         llvm_args = (self.emit_value(arg) for arg in arguments)
         return self.llvm_builder.sub(*llvm_args)
 
     @staticmethod
-    def int_mul(self: FunctionCodegen, func: Function, arguments: Sequence[Value], location: Location):
+    def int_mul(self: FunctionCodegen, _: Function, arguments: Sequence[Value], _1: Location):
         llvm_args = (self.emit_value(arg) for arg in arguments)
         return self.llvm_builder.mul(*llvm_args)

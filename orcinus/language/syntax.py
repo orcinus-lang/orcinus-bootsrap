@@ -560,7 +560,7 @@ class TypeDeclarationAST(MemberAST):
         return self.tok_name.location
 
 
-@dataclass(unsafe_hash=True, frozen=True)
+@dataclass(unsafe_hash=True, frozen=True, repr=False)
 class StructAST(TypeDeclarationAST):
     tok_struct: SyntaxToken
     generic_parameters: Sequence[GenericParameterAST]
@@ -568,6 +568,9 @@ class StructAST(TypeDeclarationAST):
     @property
     def children(self) -> Sequence[SyntaxSymbol]:
         return self._cleanup(self.attributes, self.tok_struct, self.tok_name, self.generic_parameters, self.members)
+
+    def __str__(self):
+        return f'struct {self.name}'
 
 
 @dataclass(unsafe_hash=True, frozen=True)
@@ -579,6 +582,9 @@ class ClassAST(TypeDeclarationAST):
     def children(self) -> Sequence[SyntaxSymbol]:
         return self._cleanup(self.attributes, self.tok_class, self.tok_name, self.generic_parameters, self.members)
 
+    def __str__(self):
+        return f'class {self.name}'
+
 
 @dataclass(unsafe_hash=True, frozen=True)
 class InterfaceAST(TypeDeclarationAST):
@@ -589,6 +595,9 @@ class InterfaceAST(TypeDeclarationAST):
     def children(self) -> Sequence[SyntaxSymbol]:
         return self._cleanup(self.attributes, self.tok_interface, self.tok_name, self.generic_parameters, self.members)
 
+    def __str__(self):
+        return f'interface {self.name}'
+
 
 @dataclass(unsafe_hash=True, frozen=True)
 class EnumAST(TypeDeclarationAST):
@@ -598,6 +607,9 @@ class EnumAST(TypeDeclarationAST):
     @property
     def children(self) -> Sequence[SyntaxSymbol]:
         return self._cleanup(self.attributes, self.tok_enum, self.tok_name, self.generic_parameters, self.members)
+
+    def __str__(self):
+        return f'enum {self.name}'
 
 
 @dataclass(unsafe_hash=True, frozen=True)

@@ -225,11 +225,11 @@ class SemanticContext:
 
     def open(self, document: Document) -> SemanticModel:
         """ Open module from file """
-        if document.uri in self.models:
-            return self.models[document.uri]
+        if document.name in self.models:
+            return self.models[document.name]
 
         model = SemanticModel(self, document.name, document.tree, diagnostics=self.diagnostics)
-        self.models[document.uri] = model
+        self.models[document.name] = model
         model.analyze()
         return model
 
@@ -307,7 +307,7 @@ class SemanticModel:
 
     @multimethod
     def annotate_scope(self, node: EnumAST) -> LexicalScope:
-        return LexicalScope(self.scopes[node.parent])
+        return LexicalScope(name=node.name, parent=self.scopes[node.parent], location=node.location)
 
     def import_symbols(self, node: ModuleAST):
         """ Import symbols from imported scopes """
@@ -404,6 +404,10 @@ class SemanticModel:
         return Module(self, self.module_name, Location(node.location.filename))
 
     @multimethod
+    def annotate_symbol(self, node: AttributeAST) -> Attribute:
+        return Attribute(node.name, [self.symbols[arg] for arg in node.arguments], node.location)
+
+    @multimethod
     def annotate_symbol(self, node: FunctionAST) -> Function:
         parent = self.symbols[node.parent]
         generic_parameters = self.annotate_generics(node.generic_parameters)
@@ -445,6 +449,8 @@ class SemanticModel:
                 return BooleanType(parent, node.location)
             elif node.name == "void":
                 return VoidType(parent, node.location)
+            elif node.name == "char":
+                return CharacterType(parent, node.location)
 
         attributes = self.annotate_attributes(node.attributes)
         generic_parameters = self.annotate_generics(node.generic_parameters)
@@ -488,6 +494,34 @@ class SemanticModel:
         return Field(cast(Type, parent), node.name, field_type, node.location)
 
     @multimethod
+    def emit_symbol(self, node: IntegerExpressionAST) -> Symbol:
+        return IntegerConstant(self.context.integer_type, node.value, node.location)
+
+    @multimethod
+    def emit_symbol(self, node: StringExpressionAST) -> Symbol:
+        return StringConstant(self.context.string_type, node.value, node.location)
+
+    @multimethod
+    def emit_symbol(self, node: NamedExpressionAST) -> Symbol:
+        if node.name in ['True', 'False']:
+            return BooleanConstant(self.context.boolean_type, node.name == 'True', node.location)
+        elif node.name == 'void':
+            return self.context.void_type
+        elif node.name == 'bool':
+            return self.context.boolean_type
+        elif node.name == 'int':
+            return self.context.integer_type
+        elif node.name == 'char':
+            return self.context.string_type
+
+        scope = self.scopes[node]
+        symbol = scope.resolve(node.name)
+        if not symbol:
+            self.diagnostics.error(node.location, f"Not found symbol `{node.name} in current scope`")
+            return ErrorSymbol(self.module, node.location)
+        return symbol
+
+    @multimethod
     def initialize_symbol(self, node: SyntaxNode):
         pass
 
@@ -513,8 +547,9 @@ class SemanticModel:
     def initialize_symbol(self, node: TypeDeclarationAST):
         type_symbol = self.symbols[node]
         for member in node.members:
-            if getattr(member, 'name', None):
-                type_symbol.scope.define(member.name, member)
+            name = getattr(member, 'name', None)
+            if name:
+                type_symbol.scope.define(name, member)
 
         for member in node.members:
             symbol = self.symbols[member]
@@ -821,6 +856,18 @@ class SemanticModel:
             func = self.resolve_function(self.scopes[node], '__mul__', arguments, node.location)
         elif node.operator == BinaryID.Div:
             func = self.resolve_function(self.scopes[node], '__div__', arguments, node.location)
+        elif node.operator == BinaryID.EqEqual:
+            func = self.resolve_function(self.scopes[node], '__eq__', arguments, node.location)
+        elif node.operator == BinaryID.NotEqual:
+            func = self.resolve_function(self.scopes[node], '__ne__', arguments, node.location)
+        elif node.operator == BinaryID.Great:
+            func = self.resolve_function(self.scopes[node], '__gt__', arguments, node.location)
+        elif node.operator == BinaryID.GreatEqual:
+            func = self.resolve_function(self.scopes[node], '__ge__', arguments, node.location)
+        elif node.operator == BinaryID.Less:
+            func = self.resolve_function(self.scopes[node], '__lt__', arguments, node.location)
+        elif node.operator == BinaryID.LessEqual:
+            func = self.resolve_function(self.scopes[node], '__le__', arguments, node.location)
         else:
             func = None
             self.diagnostics.error(node.location, "Not implemented binary operator")
@@ -933,12 +980,13 @@ class InstantiateContext:
         if not func.is_generic:
             return func
 
-        if func.generic_arguments:
-            generic_arguments =
-
-        func_type = self.instantiate(func.type, location)
-        new_func = Function(self.module, func.name, func_type)
         raise NotImplementedError
+        # if func.generic_arguments:
+        #     generic_arguments =
+        #
+        # func_type = self.instantiate(func.type, location)
+        # new_func = Function(self.module, func.name, func_type)
+        # raise NotImplementedError
 
     @multimethod
     def instantiate(self, field: Field, location: Location) -> Field:
@@ -1387,7 +1435,7 @@ class GenericSymbol(NamedSymbol, abc.ABC):
         return super(GenericSymbol, self).__str__()
 
 
-class ErrorSymbol(ContainerSymbol):
+class ErrorSymbol(Symbol, ContainerSymbol):
     __location: Location
 
     def __init__(self, module: Module, location: Location):
@@ -1577,6 +1625,11 @@ class StringType(Type):
         super(StringType, self).__init__(owner, 'str', location)
 
 
+class CharacterType(Type):
+    def __init__(self, owner: ContainerSymbol, location: Location):
+        super(CharacterType, self).__init__(owner, 'char', location)
+
+
 class IntegerType(Type):
     def __init__(self, owner: ContainerSymbol, location: Location):
         super(IntegerType, self).__init__(owner, 'int', location)
@@ -1613,7 +1666,13 @@ class StructType(Type):
         if not instance:
             context = InstantiateContext(module)
             context.aggregate(self.generic_parameters, generic_arguments)
-            return StructType(module, self.name, self.location, generic_arguments=generic_arguments, definition=self)
+            instance = StructType(module, self.name, self.location, generic_arguments=generic_arguments,
+                                  definition=self)
+
+            for member in self.members:
+                new_member = context.instantiate(member, location)
+                instance.add_member(new_member)
+
         module.register_instance(self.definition or self, generic_arguments, instance)
         return instance
 
@@ -1624,7 +1683,13 @@ class InterfaceType(Type):
         if not instance:
             context = InstantiateContext(module)
             context.aggregate(self.generic_parameters, generic_arguments)
-            return InterfaceType(module, self.name, self.location, generic_arguments=generic_arguments, definition=self)
+            instance = InterfaceType(module, self.name, self.location, generic_arguments=generic_arguments,
+                                     definition=self)
+
+            for member in self.members:
+                new_member = context.instantiate(member, location)
+                instance.add_member(new_member)
+
         module.register_instance(self.definition or self, generic_arguments, instance)
         return instance
 
@@ -1884,7 +1949,8 @@ class Function(MangledSymbol, GenericSymbol, OwnedSymbol, Value):
                 new_var = instance.add_variables(original_var.name, new_type, original_var.location)
                 context.register(original_var, new_var)
 
-            instance.statement = context.instantiate(self.statement, location)
+            if self.statement:
+                instance.statement = context.instantiate(self.statement, location)
 
         module.register_instance(self.definition or self, generic_arguments, instance)
         return instance

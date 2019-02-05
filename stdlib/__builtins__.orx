@@ -1,9 +1,9 @@
 # Boolean type, can contains only two values - `True` or `False`
 struct bool:
-    # Implicit constructor for boolean values
-    [[inline]]
-    def __new__[T: ToBoolean](self, value: T) -> bool:
-        return __bool__(value)
+#    # Implicit constructor for boolean values
+#    [[inline]]
+#    def __new__[T: ToBoolean](self, value: T) -> bool:
+#        return __bool__(value)
 
     # Identity function
     [[inline]]
@@ -49,15 +49,15 @@ struct char:
 
 # Unicode string type. It's type is used utf-8 for internal storage characters.
 class str:
-    # Construct empty string
-    [[inline]]
-    def __new__() -> str:
-        return ""
-
-    # Construct string from value
-    [[inline]]
-    def __new__[T: ToString](value: T) -> str:
-        return value.__str__()
+#    # Construct empty string
+#    [[inline]]
+#    def __new__() -> str:
+#        return ""
+#
+#    # Construct string from value
+#    [[inline]]
+#    def __new__[T: ToString](value: T) -> str:
+#        return value.__str__()
 
     # Return count of unicode characters in string. It's
     [[native('orx_utf8str_len')]]
@@ -75,115 +75,115 @@ class str:
     [[inline]]
     def __str__(self) -> str:
         return self
-
-
-# This interface is required for values that can be converted to boolean values
-interface ToBoolean:
-    def __bool__(self) -> bool: ...
-
-
-# This interface is required for values that can be converted to string values
-interface ToString:
-    # Returns string representation of value
-    def __str__(self) -> str: ...
-
-
-# This interface is required for object that iterate over collections or generators.
-interface Iterator[T]:
-    # Return next element from iterator
-    def __next__(self) -> T: ...
-
-
-# This interface is required for values that can be iterable.
-interface Iterable[T]:
-    # Return iterator over elements in this iterable
-    def __iter__(self) -> Iterator[T]: ...
-
-
-# This interface is required for values that have a length.
-interface Length:
-    # Return length fo value
-    def __len__(self) -> int: ...
-
-
-# This interface is required for values that have a hash.
-interface Hashable:
-    # Return hash for value
-    def __hash__(self) -> int: ...
-
-
-# This interface is required for values that can be compared
-interface Equal[T]:
-    def __eq__(self, other: T) -> bool: ...
-
-
-# This interface is required for values that can be compared
-interface Compare[T]:
-    def __cmp__(self, other: T) -> int: ...
-
-
-# Return length for object
-[[inline]]
-def len[T: Length](self: T) -> int:
-    return __len__(self)
-
-
-# Return True if object's length is not zero
-[[inline]]
-def __bool__[T: Length](self: T) -> bool:
-    return len(self) != 0
-
-
-# Compare two objects
-def cmp[T: Compare[T]](self: T, other: T) -> int:
-    return __cmp__(self, other)
-
-
-# Return hash for object
-[[inline]]
-def hash[T: Hashable](self: T) -> int:
-    return __hash__(self)
-
-
-# Return next element from iterator
 #
-# :raise StopIteration after last item in iterator
-[[inline]]
-def next[T](self: Iterator[T]) -> T:
-    return __next__(self)
-
-
-# Return True if one of comparable values is equal to other
-[[inline]]
-def __eq__[T: Compare[T]](self: T, other: T) -> bool:
-    return cmp(self, other) == 0
-
-
-# Return True if one of comparable values is not equal to other
-[[inline]]
-def __ne__[T: Compare[T]](self: T, other: T) -> bool:
-    return cmp(self, other) != 0
-
-
-# Return True if one of comparable values is less or equal to other
-[[inline]]
-def __le__[T: Compare[T]](self: T, other: T) -> bool:
-    return cmp(self, other) <= 0
-
-
-# Return True if one of comparable values is great or equal to other
-[[inline]]
-def __ge__[T: Compare[T]](self: T, other: T) -> bool:
-    return cmp(self, other) >= 0
-
-
-# Return True if one of comparable values is less then other
-[[inline]]
-def __lt__[T: Compare[T]](self: T, other: T) -> bool:
-    return cmp(self, other) < 0
-
-
-# Return True if one of comparable values is great then other
-[[inline]]
-def __gt__[T: Compare[T]](self: T, other: T) -> bool:
-    return cmp(self, other) > 0
+#
+## This interface is required for values that can be converted to boolean values
+#interface ToBoolean:
+#    def __bool__(self) -> bool: ...
+#
+#
+## This interface is required for values that can be converted to string values
+#interface ToString:
+#    # Returns string representation of value
+#    def __str__(self) -> str: ...
+#
+#
+## This interface is required for object that iterate over collections or generators.
+#interface Iterator[T]:
+#    # Return next element from iterator
+#    def __next__(self) -> T: ...
+#
+#
+## This interface is required for values that can be iterable.
+#interface Iterable[T]:
+#    # Return iterator over elements in this iterable
+#    def __iter__(self) -> Iterator[T]: ...
+#
+#
+## This interface is required for values that have a length.
+#interface Length:
+#    # Return length fo value
+#    def __len__(self) -> int: ...
+#
+#
+## This interface is required for values that have a hash.
+#interface Hashable:
+#    # Return hash for value
+#    def __hash__(self) -> int: ...
+#
+#
+## This interface is required for values that can be compared
+#interface Equal[T]:
+#    def __eq__(self, other: T) -> bool: ...
+#
+#
+## This interface is required for values that can be compared
+#interface Compare[T]:
+#    def __cmp__(self, other: T) -> int: ...
+#
+#
+## Return length for object
+#[[inline]]
+#def len[T: Length](self: T) -> int:
+#    return __len__(self)
+#
+#
+## Return True if object's length is not zero
+#[[inline]]
+#def __bool__[T: Length](self: T) -> bool:
+#    return len(self) != 0
+#
+#
+## Compare two objects
+#def cmp[T: Compare[T]](self: T, other: T) -> int:
+#    return __cmp__(self, other)
+#
+#
+## Return hash for object
+#[[inline]]
+#def hash[T: Hashable](self: T) -> int:
+#    return __hash__(self)
+#
+#
+## Return next element from iterator
+##
+## :raise StopIteration after last item in iterator
+#[[inline]]
+#def next[T](self: Iterator[T]) -> T:
+#    return __next__(self)
+#
+#
+## Return True if one of comparable values is equal to other
+#[[inline]]
+#def __eq__[T: Compare[T]](self: T, other: T) -> bool:
+#    return cmp(self, other) == 0
+#
+#
+## Return True if one of comparable values is not equal to other
+#[[inline]]
+#def __ne__[T: Compare[T]](self: T, other: T) -> bool:
+#    return cmp(self, other) != 0
+#
+#
+## Return True if one of comparable values is less or equal to other
+#[[inline]]
+#def __le__[T: Compare[T]](self: T, other: T) -> bool:
+#    return cmp(self, other) <= 0
+#
+#
+## Return True if one of comparable values is great or equal to other
+#[[inline]]
+#def __ge__[T: Compare[T]](self: T, other: T) -> bool:
+#    return cmp(self, other) >= 0
+#
+#
+## Return True if one of comparable values is less then other
+#[[inline]]
+#def __lt__[T: Compare[T]](self: T, other: T) -> bool:
+#    return cmp(self, other) < 0
+#
+#
+## Return True if one of comparable values is great then other
+#[[inline]]
+#def __gt__[T: Compare[T]](self: T, other: T) -> bool:
+#    return cmp(self, other) > 0

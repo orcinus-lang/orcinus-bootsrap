@@ -1,4 +1,4 @@
-[[native]]
+[[ native ]]
 class UnsafeBuffer[T]:
     # UnsafeBuffer - instance of this class is represented native unsafe buffer for abstract data structures.
     #
@@ -12,3 +12,19 @@ class UnsafeBuffer[T]:
 
     # Resize buffer to length
     def resize(self, length: int): ...
+
+
+[[ native ]]
+class Array[T]:
+    #  Return length of elements in array
+    def __len__(self) -> int: ...
+
+    # Return array's element by it's index
+    def __getitem__(self, index: int) -> T: ...
+
+    # Change array's element by it's index
+    def __setitem__(self, index: int, item: T): ...
+
+
+def main(args: Array[str], env: Mapping[str, str]) -> int:
+    pass

@@ -2,5 +2,6 @@
 # Exit from application.
 #
 # Returns `status` as result of application execution.
+#[[ native('orx_exit') ]]
 [[ native ]]
 def exit(status: int): ...

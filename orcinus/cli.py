@@ -119,7 +119,7 @@ def process_pdb(action):
     return wrapper
 
 
-def build(filenames: Sequence[str]):
+def build(filenames: Sequence[str], stream=sys.stdout):
     # initialize llvm targets
     binding.initialize()
     binding.initialize_native_target()
@@ -136,7 +136,7 @@ def build(filenames: Sequence[str]):
         if module:
             generator = ModuleCodegen(document.model.context, document.name)
             generator.emit(module)
-            print(generator)
+            stream.write(str(generator))
 
 
 def start_server(hostname, port):

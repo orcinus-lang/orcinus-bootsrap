@@ -313,7 +313,7 @@ class SemanticModel:
         """ Import symbols from imported scopes """
 
         # TODO: Import builtin module
-        scope: LexicalScope = self.scopes[node]
+        scope: Scope = self.scopes[node]
 
         for child in node.imports:
             if isinstance(child, ImportFromAST):
@@ -321,11 +321,11 @@ class SemanticModel:
                 module = imported_model.module
 
                 for alias in child.aliases:
-                    symbol = module.scope.get(alias.name)
+                    symbol = module.scope.resolve(alias.name)
                     if not symbol:
                         self.diagnostics.error(
                             alias.location, f"Not found symbol ‘{alias.name}’ in module ‘{child.module}’")
-                    scope.append(symbol, name=alias.alias or alias.name)
+                    scope.insert(alias.alias or alias.name, symbol)
 
             else:
                 self.diagnostics.error(node.location, "Not implemented symbol importing")
@@ -744,7 +744,7 @@ class SemanticModel:
             symbol = self.current_function.add_variables(node.name, value.type, location)
 
             scope: LexicalScope = self.scopes[node]
-            scope.append(symbol)
+            scope.insert(symbol.name, symbol)
 
         if symbol.type != value.type:
             message = f"Can not cast  from type ‘{value.type}’ type, got ‘{symbol.type}’"

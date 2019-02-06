@@ -100,7 +100,9 @@ class ModuleCodegen:
         llvm_params = [self.llvm_types[param.type] for param in func.parameters]
         llvm_type = ir.FunctionType(llvm_return, llvm_params)
         llvm_func = ir.Function(self.llvm_module, llvm_type, func.mangled_name)
-        llvm_func.linkage = 'internal'
+
+        if func.statement:
+            llvm_func.linkage = 'internal'
 
         for llvm_arg, param in zip(llvm_func.args, func.parameters):
             llvm_arg.name = param.name

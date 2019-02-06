@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import warnings as pywarnings
+from io import StringIO
 
 import pytest
 
@@ -66,9 +67,10 @@ def get_build_options():
 
 def compile_and_execute(filename, *, name, opt_level, arguments, input=None):
     # orcinus - generate LLVM IR
-    code, assembly, stderr = execute([BOOTSTRAP_SCRIPT, 'build', filename], is_binary=True)
-    if code:
-        return False, -code, assembly, stderr.decode('utf-8').rstrip()
+    from orcinus.cli import build
+    buffer = StringIO()
+    build([filename], stream=buffer)
+    assembly = buffer.getvalue().encode('utf-8')
 
     # lli-6.0 - compile LLVM IR and execute
     flags = [

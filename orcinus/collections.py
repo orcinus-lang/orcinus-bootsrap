@@ -46,7 +46,7 @@ class LazyEmptyDict(collections.abc.MutableMapping):
         except KeyError:
             value = self.__constructor(item)
             if value is None:
-                return None
+                return value
 
             self.__items[item] = value
             self.__initializer(item)

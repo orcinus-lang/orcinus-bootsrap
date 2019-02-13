@@ -278,32 +278,58 @@ class SemanticModel:
 
     @multimethod
     def annotate_scope(self, node: SyntaxNode) -> LexicalScope:
+        if node in self.scopes:
+            return self.scopes[node]
+
         return self.scopes[node.parent]
 
     @multimethod
     def annotate_scope(self, node: ModuleAST) -> LexicalScope:
+        if node in self.scopes:
+            return self.scopes[node]
+
         return LexicalScope(name=self.module_name, model=self, location=node.location)
 
     @multimethod
     def annotate_scope(self, node: FunctionAST) -> LexicalScope:
-        return LexicalScope(name=node.name, parent=self.scopes[node.parent], location=node.location)
+        parent = self.scopes[node.parent]
+        if node in self.scopes:
+            return self.scopes[node]
+
+        return LexicalScope(name=node.name, parent=parent, location=node.location)
 
     @multimethod
     def annotate_scope(self, node: BlockStatementAST) -> LexicalScope:
+        parent = self.scopes[node.parent]
+        if node in self.scopes:
+            return self.scopes[node]
+
         name = f'block#{node.location.begin.line}'
-        return LexicalScope(name=name, parent=self.scopes[node.parent], location=node.location)
+        return LexicalScope(name=name, parent=parent, location=node.location)
 
     @multimethod
     def annotate_scope(self, node: ClassAST) -> LexicalScope:
-        return LexicalScope(name=node.name, parent=self.scopes[node.parent], location=node.location)
+        parent = self.scopes[node.parent]
+        if node in self.scopes:
+            return self.scopes[node]
+
+        return LexicalScope(name=node.name, parent=parent, location=node.location)
 
     @multimethod
     def annotate_scope(self, node: StructAST) -> LexicalScope:
-        return LexicalScope(name=node.name, parent=self.scopes[node.parent], location=node.location)
+        parent = self.scopes[node.parent]
+        if node in self.scopes:
+            return self.scopes[node]
+
+        return LexicalScope(name=node.name, parent=parent, location=node.location)
 
     @multimethod
     def annotate_scope(self, node: InterfaceAST) -> LexicalScope:
-        return LexicalScope(name=node.name, parent=self.scopes[node.parent], location=node.location)
+        parent = self.scopes[node.parent]
+        if node in self.scopes:
+            return self.scopes[node]
+
+        return LexicalScope(name=node.name, parent=parent, location=node.location)
 
     @multimethod
     def annotate_scope(self, node: EnumAST) -> LexicalScope:
@@ -320,12 +346,14 @@ class SemanticModel:
                 imported_model = self.context.load(child.module)
                 module = imported_model.module
 
+                self.module.add_dependency(module)
+
                 for alias in child.aliases:
-                    symbol = module.scope.get(alias.name)
+                    symbol = module.scope.resolve(alias.name)
                     if not symbol:
                         self.diagnostics.error(
                             alias.location, f"Not found symbol ‘{alias.name}’ in module ‘{child.module}’")
-                    scope.append(symbol, name=alias.alias or alias.name)
+                    scope.insert(alias.alias or alias.name, symbol)
 
             else:
                 self.diagnostics.error(node.location, "Not implemented symbol importing")
@@ -371,6 +399,8 @@ class SemanticModel:
             return self.context.boolean_type
         elif node.name == 'int':
             return self.context.integer_type
+        elif node.name == 'str':
+            return self.context.string_type
 
         symbol = self.scopes[node].resolve(node.name)
         if isinstance(symbol, Type):
@@ -406,6 +436,9 @@ class SemanticModel:
     @multimethod
     def annotate_symbol(self, node: FunctionAST) -> Function:
         parent = self.symbols[node.parent]
+        if node in self.symbols:
+            return self.symbols[node]
+
         generic_parameters = self.annotate_generics(node.generic_parameters)
         attributes = self.annotate_attributes(node.attributes)
 
@@ -432,11 +465,15 @@ class SemanticModel:
             func_param.location = node_param.location
 
             self.symbols[node_param] = func_param
+
+        # assert node not in self.symbols
         return func
 
     @multimethod
     def annotate_symbol(self, node: StructAST) -> Type:
         parent = self.symbols[node.parent]
+        if node in self.symbols:
+            return self.symbols[node]
 
         if self.module == self.context.builtins_module:
             if node.name == "int":
@@ -454,6 +491,8 @@ class SemanticModel:
     @multimethod
     def annotate_symbol(self, node: ClassAST) -> Type:
         parent = self.symbols[node.parent]
+        if node in self.symbols:
+            return self.symbols[node]
 
         if self.module == self.context.builtins_module:
             if node.name == "str":
@@ -466,11 +505,22 @@ class SemanticModel:
     @multimethod
     def annotate_symbol(self, node: InterfaceAST) -> Type:
         parent = self.symbols[node.parent]
+        if node in self.symbols:
+            return self.symbols[node]
 
         attributes = self.annotate_attributes(node.attributes)
         generic_parameters = self.annotate_generics(node.generic_parameters)
         return InterfaceType(parent, node.name, node.location, generic_parameters=generic_parameters,
                              attributes=attributes)
+
+    @multimethod
+    def annotate_symbol(self, node: EnumAST) -> Type:
+        parent = self.symbols[node.parent]
+        if node in self.symbols:
+            return self.symbols[node]
+
+        attributes = self.annotate_attributes(node.attributes)
+        return EnumType(parent, node.name, node.location, attributes=attributes)
 
     @multimethod
     def annotate_symbol(self, node: GenericParameterAST) -> GenericType:
@@ -479,6 +529,8 @@ class SemanticModel:
     @multimethod
     def annotate_symbol(self, node: FieldAST) -> Symbol:
         parent = self.symbols[node.parent]
+        if node in self.symbols:
+            return self.symbols[node]
 
         if not isinstance(parent, Type):
             self.diagnostics.error(node.location, "Field member must be declared in type")
@@ -526,11 +578,17 @@ class SemanticModel:
             if isinstance(member, FunctionAST):
                 self.emit_function(member)
 
+            elif isinstance(member, TypeDeclarationAST):
+                for child in member.members:
+                    if isinstance(child, FunctionAST):
+                        self.emit_function(child)
+
     def emit_function(self, node: FunctionAST):
         func = self.symbols[node]
         if not isinstance(node.statement, EllipsisStatementAST):
             with self.with_function(func):
-                func.statement = self.emit_statement(node.statement)
+                statement = self.emit_statement(node.statement)
+                func.statement = statement
 
     def get_functions(self, scope: LexicalScope, name: str, self_type: Type = None) -> Sequence[Function]:
         functions = []
@@ -852,6 +910,8 @@ class SemanticModel:
             return self.context.boolean_type
         elif node.name == 'int':
             return self.context.integer_type
+        elif node.name == 'str':
+            return self.context.string_type
 
         scope = self.scopes[node]
         symbol = scope.resolve(node.name)
@@ -934,7 +994,7 @@ class InstantiateContext:
             return func
 
         if func.generic_arguments:
-            generic_arguments =
+            pass
 
         func_type = self.instantiate(func.type, location)
         new_func = Function(self.module, func.name, func_type)
@@ -1343,6 +1403,9 @@ class ContainerSymbol(abc.ABC):
         return self.__members
 
     def add_member(self, symbol: OwnedSymbol):
+        if symbol in self.__members:
+            return
+
         self.__members.append(symbol)
         if isinstance(symbol, NamedSymbol):
             self.__scope.insert(symbol.name, symbol)
@@ -1387,7 +1450,7 @@ class GenericSymbol(NamedSymbol, abc.ABC):
         return super(GenericSymbol, self).__str__()
 
 
-class ErrorSymbol(ContainerSymbol):
+class ErrorSymbol(Symbol, ContainerSymbol):
     __location: Location
 
     def __init__(self, module: Module, location: Location):
@@ -1461,6 +1524,7 @@ class Module(NamedSymbol, ContainerSymbol):
         self.__instances = {}  # Map of all generic instances
         self.__functions = []
         self.__types = []
+        self.__dependencies = []
 
     @property
     def model(self) -> SemanticModel:
@@ -1475,11 +1539,22 @@ class Module(NamedSymbol, ContainerSymbol):
         return self.__location
 
     @property
+    def dependencies(self) -> Sequence[Module]:
+        return self.__dependencies
+
+    @property
     def functions(self) -> Sequence[Function]:
         return self.__functions
 
+    @property
+    def types(self) -> Sequence[Type]:
+        return self.__types
+
     def add_function(self, func: Function):
         self.__functions.append(func)
+
+    def add_type(self, type: Type):
+        self.__types.append(type)
 
     def find_instance(self, generic: GenericSymbol, generic_arguments):
         key = (generic, tuple(generic_arguments))
@@ -1488,6 +1563,9 @@ class Module(NamedSymbol, ContainerSymbol):
     def register_instance(self, generic: GenericSymbol, generic_arguments, instance: GenericSymbol):
         key = (generic, tuple(generic_arguments))
         self.__instances[key] = instance
+
+    def add_dependency(self, module: Module):
+        self.__dependencies.append(module)
 
 
 class Type(MangledSymbol, GenericSymbol, OwnedSymbol, ContainerSymbol, abc.ABC):
@@ -1504,6 +1582,8 @@ class Type(MangledSymbol, GenericSymbol, OwnedSymbol, ContainerSymbol, abc.ABC):
         self.__generic_parameters = tuple(generic_parameters or [])
         self.__generic_arguments = tuple(generic_arguments or [])
         self.__definition = definition
+
+        self.module.add_type(self)
 
     @property
     def attributes(self) -> Sequence[Attribute]:
@@ -1541,6 +1621,10 @@ class Type(MangledSymbol, GenericSymbol, OwnedSymbol, ContainerSymbol, abc.ABC):
     @property
     def is_pointer(self) -> True:
         return False
+
+    @property
+    def methods(self) -> Sequence[Function]:
+        return [member for member in self.members if isinstance(member, Function)]
 
     def __hash__(self):
         return id(self)
@@ -1608,6 +1692,10 @@ class ClassType(Type):
 
 
 class StructType(Type):
+    @property
+    def fields(self) -> Sequence[Field]:
+        return tuple(field for field in self.members if isinstance(field, Field))
+
     def instantiate(self, module: Module, generic_arguments: Sequence[Type], location: Location):
         instance = module.find_instance(self.definition or self, generic_arguments)
         if not instance:
@@ -1619,6 +1707,10 @@ class StructType(Type):
 
 
 class InterfaceType(Type):
+    @property
+    def fields(self) -> Sequence[Field]:
+        return tuple(field for field in self.members if isinstance(field, Field))
+
     def instantiate(self, module: Module, generic_arguments: Sequence[Type], location: Location):
         instance = module.find_instance(self.definition or self, generic_arguments)
         if not instance:
@@ -1627,6 +1719,10 @@ class InterfaceType(Type):
             return InterfaceType(module, self.name, self.location, generic_arguments=generic_arguments, definition=self)
         module.register_instance(self.definition or self, generic_arguments, instance)
         return instance
+
+
+class EnumType(Type):
+    pass
 
 
 class FunctionType(Type):
@@ -1778,9 +1874,9 @@ class Function(MangledSymbol, GenericSymbol, OwnedSymbol, Value):
         super(Function, self).__init__(func_type, location)
         self.__owner = owner
         self.__name = name
-        self.__parameters = [
+        self.__parameters = tuple(
             Parameter(self, f'arg{idx}', param_type) for idx, param_type in enumerate(func_type.parameters)
-        ]
+        )
         self.__statement = None
         self.__generic_parameters = tuple(generic_parameters or [])
         self.__generic_arguments = tuple(generic_arguments or [])

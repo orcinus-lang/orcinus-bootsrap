@@ -9,10 +9,8 @@ import functools
 import logging
 import os
 import sys
-from typing import Sequence
 
 from colorlog import ColoredFormatter
-from llvmlite import binding
 
 from orcinus import __version__ as version
 from orcinus.codegen import ModuleCodegen
@@ -119,24 +117,21 @@ def process_pdb(action):
     return wrapper
 
 
-def build(filenames: Sequence[str]):
-    # initialize llvm targets
-    binding.initialize()
-    binding.initialize_native_target()
-    binding.initialize_native_asmparser()
-    binding.initialize_native_asmprinter()
-
+def build(filename: str):
     # initialize workspace context
     workspace = Workspace(paths=[os.getcwd()])
-    for filename in filenames:
-        document = workspace.get_or_create_document(filename)
-        module = document.module
-        exit_diagnostics(document.diagnostics)
+    document = workspace.get_or_create_document(filename)
+    module = document.module
+    exit_diagnostics(document.diagnostics)
 
-        if module:
-            generator = ModuleCodegen(document.model.context, document.name)
-            generator.emit(module)
-            print(generator)
+    if module:
+        generator = ModuleCodegen(document.model.context)
+
+        with open(module.name + '.hpp', 'w+', encoding='utf-8') as stream:
+            generator.emit_header(module, stream)
+
+        with open(module.name + '.cpp', 'w+', encoding='utf-8') as stream:
+            generator.emit_source(module, stream)
 
 
 def start_server(hostname, port):
@@ -159,18 +154,10 @@ def main():
 
     # build package
     build_cmd = subparsers.add_parser('build')
-    build_cmd.add_argument('filenames', type=str, nargs='+', help="files")
+    build_cmd.add_argument('filename', type=str, help="input file")
     build_cmd.add_argument('--pdb', dest=KEY_PDB, action='store_true', help="post-mortem mode")
     build_cmd.add_argument('-l', '--level', dest=KEY_LEVEL, choices=LEVELS, default=DEFAULT_LEVEL)
     build_cmd.add_argument(dest=KEY_ACTION, help=argparse.SUPPRESS, action='store_const', const=build)
-
-    # add command: Run LSP server
-    server_cmd = subparsers.add_parser('server', help='Run server language server protocol')
-    server_cmd.add_argument('--pdb', dest=KEY_PDB, action='store_true', help="post-mortem mode")
-    server_cmd.add_argument('-l', '--level', dest=KEY_LEVEL, choices=LEVELS, default=DEFAULT_LEVEL)
-    server_cmd.add_argument('--hostname', type=str, default='0.0.0.0')
-    server_cmd.add_argument('--port', type=int, default=55290)
-    server_cmd.add_argument(dest=KEY_ACTION, help=argparse.SUPPRESS, action='store_const', const=start_server)
 
     # parse arguments
     kwargs = parser.parse_args().__dict__

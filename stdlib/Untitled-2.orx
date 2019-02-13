@@ -1,0 +1,46 @@
+import enum
+import dataclasses
+
+
+enum TokenID:
+    EndOfFile
+    Name
+
+
+@enum.unique
+class TokenID(enum.enum):
+    EndOfFile = enum.auto()
+    Name = enum.auto()
+
+
+struct SyntaxToken:
+    id: TokenID
+    value: str
+    location: Location
+
+
+@dataclasses.dataclass
+class SyntaxToken:
+    id: TokenID
+    value: str
+    location: Location
+
+
+class Scanner:
+    __stream: TextIO
+    __location: Location
+    __index: int64
+
+    def __init__(self, filename: str, stream: ByteIO):
+        self.__stream = TextIO(stream, encoding='utf-8')
+        self.__location = Location(filename)
+        self.__index = 0
+
+    def tokenize(self) -> SyntaxToken
+        pass
+
+    def __iter__(self) -> Iterator[SyntaxToken]:
+        while not self.is_eof():
+            yield seld.tokenize()
+
+        yield SyntaxToken(TokenID.EndOfFile, "", self.__location)

@@ -318,8 +318,6 @@ class SyntaxCollection(SyntaxNode, collections.abc.Sequence):
         return self.__children
 
     def __hash__(self):
-        if self.children:
-            return hash((id(self), self.children))
         return hash(id(self))
 
     def __getitem__(self, i: int):
@@ -640,7 +638,7 @@ class ParameterAST(SyntaxNode):
         return self.tok_name.location
 
 
-@dataclass(unsafe_hash=True, frozen=True)
+@dataclass(frozen=True)
 class FunctionAST(MemberAST):
     attributes: Sequence[AttributeAST]
     tok_def: SyntaxToken
@@ -653,6 +651,9 @@ class FunctionAST(MemberAST):
     return_type: TypeAST
     tok_colon: SyntaxToken
     statement: Optional[StatementAST]
+
+    def __hash__(self):
+        return id(self)
 
     @property
     def children(self) -> Sequence[SyntaxSymbol]:

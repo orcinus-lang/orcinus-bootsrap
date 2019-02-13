@@ -4,408 +4,445 @@
 # of the MIT license.  See the LICENSE file for details.
 from __future__ import annotations
 
-from typing import Mapping
+from io import StringIO
+from typing import TextIO
 
-from llvmlite import binding
-from llvmlite import ir
-from multidict import MultiDict
-
-from orcinus.collections import LazyDict
 from orcinus.language.semantic import *
-from orcinus.utils import cached_property
 
 
 class ModuleCodegen:
-    def __init__(self, context: SemanticContext, name='<stdin>'):
-        self.llvm_module = ir.Module(name)
-        self.llvm_module.triple = binding.Target.from_default_triple().triple
-
-        # names to symbol
-        self.types = {}
-        self.functions = MultiDict()
-
-        # symbol to llvm
-        self.llvm_types = LazyDict(constructor=self.declare_type, initializer=self.initialize_type)
-        self.llvm_functions = LazyDict(constructor=self.declare_function)
-
+    def __init__(self, context: SemanticContext):
         # builtins functions
         self.context = context
-        self.builtins = BuiltinsCodegen(self)
 
     def __str__(self):
         return str(self.llvm_module)
 
-    @property
-    def llvm_context(self) -> ir.Context:
-        return self.llvm_module.context
+    def emit_header(self, module: Module, stream: TextIO):
+        writer = HeaderWriter(Stream(stream))
+        writer.write_module(module)
 
-    @cached_property
-    def llvm_size(self) -> ir.IntType:
-        return ir.IntType(32)
+    def emit_source(self, module: Module, stream: TextIO):
+        writer = SourceWriter(Stream(stream))
+        writer.write_module(module)
 
-    @cached_property
-    def llvm_void(self) -> ir.VoidType:
-        return ir.VoidType()
 
-    @cached_property
-    def llvm_opaque(self):
-        return ir.IntType(8).as_pointer()
+class Stream:
+    def __init__(self, stream: TextIO):
+        self.stream = stream
 
-    @cached_property
-    def llvm_malloc(self):
-        llvm_type = ir.FunctionType(self.llvm_opaque, [self.llvm_size])
-        return ir.Function(self.llvm_module, llvm_type, 'malloc')
+    def write(self, value: str = None):
+        if value:
+            self.stream.write(value)
 
-    @multimethod
-    def declare_type(self, type_symbol: Type):
-        raise Diagnostic(type_symbol.location, DiagnosticSeverity.Error, "Not implemented type conversion to LLVM")
+    def write_line(self, value: str = None):
+        self.write(value)
+        self.stream.write('\n')
 
-    @multimethod
-    def declare_type(self, _: VoidType):
-        return ir.VoidType()
 
-    @multimethod
-    def declare_type(self, _: BooleanType):
-        return ir.IntType(1)
+class Writer:
+    def __init__(self, stream: Stream):
+        self.stream = stream
 
-    @multimethod
-    def declare_type(self, _: IntegerType):
-        return ir.IntType(64)
+    def write_pragma(self, pragma):
+        self.stream.write_line(f'#pragma {pragma}')
 
-    @multimethod
-    def declare_type(self, type_symbol: ClassType):
-        """ class = pointer to struct { fields... } """
-        llvm_struct = self.llvm_context.get_identified_type(type_symbol.mangled_name)
-        return llvm_struct.as_pointer()
-
-    def declare_function(self, func: Function):
-        llvm_return = self.llvm_types[func.return_type]
-        llvm_params = [self.llvm_types[param.type] for param in func.parameters]
-        llvm_type = ir.FunctionType(llvm_return, llvm_params)
-        llvm_func = ir.Function(self.llvm_module, llvm_type, func.mangled_name)
-        llvm_func.linkage = 'internal'
-
-        for llvm_arg, param in zip(llvm_func.args, func.parameters):
-            llvm_arg.name = param.name
-
-        return llvm_func
-
-    @multimethod
-    def initialize_type(self, _: Type):
-        pass
-
-    @multimethod
-    def initialize_type(self, type_symbol: ClassType):
-        llvm_struct = self.llvm_context.get_identified_type(type_symbol.mangled_name)
-        llvm_fields = (self.llvm_types[field.type] for field in type_symbol.fields)
-        llvm_struct.set_body(*llvm_fields)
-
-    def emit(self, module: Module):
-        for func in module.functions:
-            if not func.is_generic:
-                self.emit_function(func)
-
-    def emit_function(self, func: Function):
-        llvm_func = self.llvm_functions[func]
-        if func.statement:
-            builder = FunctionCodegen(self, func, llvm_func)
-            builder.emit_statement(func.statement)
-        if func.name == 'main':
-            self.emit_main(func)
-        return llvm_func
-
-    def emit_main(self, func: Function):
-        # main prototype
-        llvm_type = ir.FunctionType(ir.IntType(32), [
-            ir.IntType(32),
-            ir.IntType(8).as_pointer().as_pointer()
-        ])
-        llvm_func = ir.Function(self.llvm_module, llvm_type, name="main")
-
-        argc, argv = llvm_func.args
-        argc.name, argv.name = 'argc', 'argv'
-
-        llvm_entry = llvm_func.append_basic_block('entry')
-        llvm_builder = ir.IRBuilder(llvm_entry)
-
-        if func.parameters:
-            raise Diagnostic(func.location, DiagnosticSeverity.Error, f"Main function must have zero arguments")
+    def write_include(self, filename: str, is_system=False):
+        if is_system:
+            self.stream.write_line(f'#include <{filename}>')
         else:
-            arguments = []
-        llvm_result = llvm_builder.call(self.llvm_functions[func], arguments)
+            self.stream.write_line(f'#include "{filename}"')
 
-        if not isinstance(func.return_type, (VoidType, IntegerType)):
-            raise Diagnostic(func.location, DiagnosticSeverity.Error,
-                             f"Return type of main function must be ‘int’ or ‘void’")
-        elif isinstance(func.return_type, VoidType):
-            llvm_result = ir.Constant(ir.IntType(32), 0)
+    def get_module_name(self, module: Module) -> str:
+        return module.name.replace('.', '::')
 
-        if llvm_result.type.width > 32:
-            llvm_result = llvm_builder.trunc(llvm_result, ir.IntType(32))
-        elif llvm_result.type.width < 32:
-            llvm_result = llvm_builder.sext(llvm_result, ir.IntType(32))
-        llvm_builder.ret(llvm_result)
+    def get_type_name(self, vtype: Type) -> str:
+        if isinstance(vtype, StringType):
+            return 'std::string'
+
+        elif isinstance(vtype, IntegerType):
+            return 'std::int64_t'
+
+        elif isinstance(vtype, FunctionType):
+            return_type = self.get_type_name(vtype.return_type)
+            parameters = ', '.join(self.get_type_name(param) for param in vtype.parameters)
+            return f'std::function<{return_type} ({parameters})>'
+
+        elif isinstance(vtype, (ClassType, InterfaceType, StructType, EnumType)):
+            return f'::{self.get_module_name(vtype.module)}::{vtype.name}'
+
+        raise NotImplementedError
+
+    def get_function_declaration(self, symbol: Function, is_self=False):
+        parameters = symbol.parameters if not is_self else symbol.parameters[1:]
+        parameters = ', '.join(f'{self.get_type_name(param.type)} {param.name}' for param in parameters)
+        return parameters
+
+    def get_value(self, value: Value, func: Function = None) -> str:
+        stream = StringIO()
+        ValueSourceWriter(func, Stream(stream)).write_value(value)
+        return stream.getvalue()
 
 
-class FunctionCodegen:
-    def __init__(self, parent: ModuleCodegen, func: Function, llvm_func: ir.Function):
-        self.parent = parent
-        self.function = func
-        self.llvm_function = llvm_func
-        self.llvm_variables = {}
+class MemberWriter(Writer):
+    def write_member(self, symbol: Symbol):
+        if isinstance(symbol, Type):
+            return self.write_type(symbol)
+        elif isinstance(symbol, Function):
+            return self.write_function(symbol)
+        elif isinstance(symbol, Field):
+            return self.write_field(symbol)
 
-        llvm_entry = llvm_func.append_basic_block('entry')
-        self.llvm_builder = ir.IRBuilder(llvm_entry)
+        raise NotImplementedError
 
-        for param, llvm_arg in zip(func.parameters, llvm_func.args):
-            llvm_alloca = self.llvm_builder.alloca(llvm_arg.type)
-            self.llvm_variables[param] = llvm_alloca
-            self.llvm_builder.store(llvm_arg, llvm_alloca)
+    def write_type(self, symbol: Type):
+        if isinstance(symbol, (IntegerType, StringType, FunctionType)):
+            return
+        elif isinstance(symbol, StructType):
+            return self.write_struct(symbol)
+        elif isinstance(symbol, ClassType):
+            return self.write_class(symbol)
+        elif isinstance(symbol, InterfaceType):
+            return self.write_interface(symbol)
+        elif isinstance(symbol, EnumType):
+            return self.write_enum(symbol)
 
-        for var in func.variables:
-            llvm_alloca = self.llvm_builder.alloca(self.llvm_types[var.type])
-            self.llvm_variables[var] = llvm_alloca
+        raise NotImplementedError
 
-    @property
-    def llvm_module(self) -> ir.Module:
-        return self.parent.llvm_module
+    def write_function(self, symbol: Function):
+        raise NotImplementedError
 
-    @property
-    def llvm_types(self) -> Mapping[Type, ir.Type]:
-        return self.parent.llvm_types
+    def write_class(self, member: ClassType):
+        raise NotImplementedError
 
-    @property
-    def llvm_functions(self) -> Mapping[Function, ir.Function]:
-        return self.parent.llvm_functions
+    def write_struct(self, member: StructType):
+        raise NotImplementedError
 
-    def emit_sizeof(self, type: Type):
-        llvm_type = self.parent.llvm_types[type]
-        llvm_pointer = llvm_type.as_pointer() if not type.is_pointer else llvm_type
-        llvm_size = self.llvm_builder.gep(ir.Constant(llvm_pointer, None), [ir.Constant(ir.IntType(32), 0)])
-        return self.llvm_builder.ptrtoint(llvm_size, self.parent.llvm_size)
+    def write_interface(self, member: InterfaceType):
+        raise NotImplementedError
 
-    @multimethod
-    def emit_statement(self, statement: Statement) -> bool:
-        """
+    def write_enum(self, member: EnumType):
+        raise NotImplementedError
 
-        :param statement:
-        :return: True, if statement is terminated
-        """
-        raise Diagnostic(statement.location, DiagnosticSeverity.Error, "Not implemented statement conversion to LLVM")
+    def write_field(self, symbol: Field):
+        raise NotImplementedError
 
-    @multimethod
-    def emit_statement(self, statement: BlockStatement) -> bool:
-        for child in statement.statements:
-            if self.emit_statement(child):
-                return True
 
-    @multimethod
-    def emit_statement(self, statement: PassStatement) -> bool:
-        return False  # :D
+class MemberHeaderWriter(MemberWriter):
+    def write_function(self, symbol: Function):
+        raise NotImplementedError
 
-    @multimethod
-    def emit_statement(self, statement: ReturnStatement) -> bool:
-        if statement.value:
-            llvm_value = self.emit_value(statement.value)
-            self.llvm_builder.ret(llvm_value)
+    def write_class(self, member: ClassType):
+        writer = ClassMemberHeaderWriter(self.stream)
+        self.stream.write_line(f'class {member.name} {{')
+        self.stream.write_line('public:')
+        self.stream.write_line(f'{member.name}(const {member.name}&) =delete;')
+        self.stream.write_line(f'{member.name}& operator=(const {member.name}&) =delete;')
+
+        for member in member.members:
+            writer.write_member(member)
+        self.stream.write_line('};')
+
+    def write_struct(self, member: StructType):
+        writer = StructMemberHeaderWriter(self.stream)
+        self.stream.write_line(f'class {member.name} {{')
+        self.stream.write_line('public:')
+
+        for member in member.members:
+            writer.write_member(member)
+        self.stream.write_line('};')
+
+    def write_interface(self, member: InterfaceType):
+        writer = ClassMemberHeaderWriter(self.stream)
+        self.stream.write_line(f'class {member.name} {{')
+        self.stream.write_line('public:')
+
+        self.stream.write_line(f'{member.name}(const {member.name}&) =delete;')
+        self.stream.write_line(f'{member.name}& operator=(const {member.name}&) =delete;')
+
+        for member in member.members:
+            writer.write_member(member)
+        self.stream.write_line('};')
+
+    def write_enum(self, member: EnumType):
+        raise NotImplementedError
+
+    def write_field(self, symbol: Field):
+        raise NotImplementedError
+
+
+# noinspection PyAbstractClass
+class ModuleMemberHeaderWriter(MemberHeaderWriter):
+    pass
+
+
+# noinspection PyAbstractClass
+class TypeMemberHeaderWriter(MemberHeaderWriter):
+    def write_function(self, symbol: Function):
+        if symbol.name == '__init__':
+            return self.write_constructor(symbol)
+
+        return_type = self.get_type_name(symbol.return_type)
+        self.stream.write_line(
+            f"{return_type} {symbol.name}({self.get_function_declaration(symbol, True)});"
+        )
+
+    def write_constructor(self, symbol: Function):
+        self.stream.write_line(f"{symbol.owner.name}({self.get_function_declaration(symbol, True)});")
+
+
+# noinspection PyAbstractClass
+class FieldMemberHeaderWriter(TypeMemberHeaderWriter):
+    def write_field(self, symbol: Field):
+        self.stream.write_line(f'{self.get_type_name(symbol.type)} __{symbol.name};')
+
+        self.stream.write_line(f'{self.get_type_name(symbol.type)} get_{symbol.name}() const {{')
+        self.stream.write_line(f'    return this->__{symbol.name};')
+        self.stream.write_line('}')
+
+        self.stream.write_line(f'void set_{symbol.name}({self.get_type_name(symbol.type)} value) {{')
+        self.stream.write_line(f'    this->__{symbol.name} = value;')
+        self.stream.write_line('}')
+
+
+# noinspection PyAbstractClass
+class StructMemberHeaderWriter(FieldMemberHeaderWriter):
+    pass
+
+
+# noinspection PyAbstractClass
+class ClassMemberHeaderWriter(FieldMemberHeaderWriter):
+    pass
+
+
+# noinspection PyAbstractClass
+class MemberSourceWriter(MemberWriter):
+    def write_class(self, member: ClassType):
+        writer = ClassMemberSourceWriter(self.stream)
+        for child in member.members:
+            writer.write_member(child)
+
+    def write_struct(self, member: StructType):
+        writer = ClassMemberSourceWriter(self.stream)
+        for child in member.members:
+            writer.write_member(child)
+
+    def write_enum(self, member: EnumType):
+        writer = ClassMemberSourceWriter(self.stream)
+        for child in member.members:
+            writer.write_member(child)
+
+    def write_interface(self, member: InterfaceType):
+        writer = ClassMemberSourceWriter(self.stream)
+        for child in member.members:
+            writer.write_member(child)
+
+    def write_field(self, symbol: Field):
+        raise NotImplementedError
+
+
+# noinspection PyAbstractClass
+class ModuleMemberSourceWriter(MemberSourceWriter):
+    pass
+
+
+# noinspection PyAbstractClass
+class TypeMemberSourceWriter(MemberSourceWriter):
+    def write_function(self, symbol: Function):
+        if not symbol.statement:
+            return
+
+        if symbol.name == '__init__':
+            self.write_constructor(symbol)
         else:
-            self.llvm_builder.ret_void()
-        return True
+            type_name = symbol.owner.name
+            module_name = self.get_module_name(symbol.module)
+            return_type = self.get_type_name(symbol.return_type)
+            declaration = self.get_function_declaration(symbol, True)
+            self.stream.write_line(
+                f"{return_type} ::{module_name}::{type_name}::{symbol.name}({declaration}) {{"
+            )
 
-    @multimethod
-    def emit_statement(self, statement: ExpressionStatement) -> bool:
-        self.emit_value(statement.value)
-        return False
+        write = StatementWriter(symbol, self.stream)
+        write.write_statement(symbol.statement)
+        self.stream.write_line('}')
 
-    @multimethod
-    def emit_statement(self, statement: ConditionStatement) -> bool:
-        llvm_cond = self.emit_value(statement.condition)
+    def write_constructor(self, symbol: Function):
+        type_name = symbol.owner.name
+        module_name = self.get_module_name(symbol.module)
+        self.stream.write_line(
+            f"::{module_name}::{type_name}::{type_name}({self.get_function_declaration(symbol, True)}) {{"
+        )
 
-        with self.llvm_builder.if_else(llvm_cond) as (then, otherwise):
-            # emit instructions for when the predicate is true
-            with then:
-                is_terminated = self.emit_statement(statement.then_statement)
 
-            # emit instructions for when the predicate is false
-            with otherwise:
-                if statement.else_statement:
-                    is_terminated = self.emit_statement(statement.else_statement) and is_terminated
-                else:
-                    is_terminated = False
+# noinspection PyAbstractClass
+class FieldMemberSourceWriter(TypeMemberSourceWriter):
+    pass
 
-        if is_terminated:
-            self.llvm_function.blocks.remove(self.llvm_builder.basic_block)
-        return is_terminated
 
-    @multimethod
-    def emit_statement(self, statement: WhileStatement) -> bool:
-        # condition block
-        llvm_cond_block = self.llvm_builder.append_basic_block('while.cond')
-        self.llvm_builder.branch(llvm_cond_block)
-        self.llvm_builder.position_at_end(llvm_cond_block)
-        llvm_cond = self.emit_value(statement.condition)
-        if statement.else_statement:
-            with self.llvm_builder.goto_entry_block():
-                llvm_flag = self.llvm_builder.alloca(ir.IntType(1))
-            self.llvm_builder.store(ir.Constant(ir.IntType(1), False), llvm_flag)
+# noinspection PyAbstractClass
+class ClassMemberSourceWriter(FieldMemberSourceWriter):
+    def write_field(self, symbol: Field):
+        pass  # skip
+
+
+# noinspection PyAbstractClass
+class StructMemberSourceWriter(FieldMemberSourceWriter):
+    pass
+
+
+class StatementWriter(Writer):
+    def __init__(self, function: Function, stream: Stream):
+        super(StatementWriter, self).__init__(stream)
+        self.function = function
+
+    def get_value(self, value: Value, func: Function = None) -> str:
+        stream = StringIO()
+        ValueSourceWriter(func or self.function, Stream(stream)).write_value(value)
+        return stream.getvalue()
+
+    def write_statement(self, stmt: Statement):
+        if isinstance(stmt, BlockStatement):
+            return self.write_block_statement(stmt)
+        elif isinstance(stmt, AssignStatement):
+            return self.write_assign_statement(stmt)
+
+        class_name = type(stmt).__name__
+        raise NotImplementedError(f'Not implemented: {class_name}')
+
+    def write_block_statement(self, stmt: BlockStatement):
+        for child in stmt.statements:
+            self.write_statement(child)
+
+    def write_assign_statement(self, stmt: AssignStatement):
+        write = ValueTargetWriter(self.function, self.stream)
+        write.write_value(stmt.target, stmt.source)
+        self.stream.write(';')
+
+
+class ValueWriter(Writer):
+    def __init__(self, function: Function, stream: Stream):
+        super(ValueWriter, self).__init__(stream)
+        self.function = function
+
+    def get_value(self, value: Value, func: Function = None) -> str:
+        stream = StringIO()
+        ValueSourceWriter(func or self.function, Stream(stream)).write_value(value)
+        return stream.getvalue()
+
+    def is_self_argument(self, value: Parameter):
+        if not isinstance(value, Parameter):
+            return False
+        elif not self.function.parameters:
+            return False
+        elif not isinstance(self.function.owner, Type):
+            return False
+        elif value.type != self.function.owner:
+            return False
+
+        return self.function.parameters[0] is value
+
+    def write_bounded_value(self, instance: Value):
+        self.stream.write(self.get_value(instance))
+
+        is_self = self.is_self_argument(instance)
+        is_class = isinstance(instance.type, ClassType)
+        if is_self or is_class:
+            self.stream.write('->')
         else:
-            llvm_flag = None
+            self.stream.write('.')
 
-        # then block
-        llvm_then_block = self.llvm_builder.append_basic_block('while.then')
-        self.llvm_builder.position_at_end(llvm_then_block)
-        if statement.else_statement:
-            self.llvm_builder.store(ir.Constant(ir.IntType(1), True), llvm_flag)
-        self.emit_statement(statement.then_statement)
-        if not self.llvm_builder.block.is_terminated:
-            self.llvm_builder.branch(llvm_cond_block)
+    def write_arguments(self, sequence: Sequence[Value]):
+        for idx, value in enumerate(sequence):
+            if idx:
+                self.stream.write(', ')
+            self.stream.write(self.get_value(value))
 
-        # continue block
-        llvm_continue_block = self.llvm_builder.append_basic_block('while.continue')
 
-        # condition -> then | continue
-        self.llvm_builder.position_at_end(llvm_cond_block)
-        self.llvm_builder.cbranch(llvm_cond, llvm_then_block, llvm_continue_block)
+class ValueTargetWriter(ValueWriter):
+    def write_value(self, target: Value, source: Value):
+        if isinstance(target, BoundedField):
+            return self.write_bounded_field(target, source)
 
-        if statement.else_statement:
-            llvm_else_block = self.llvm_builder.append_basic_block('while.else')
+        class_name = type(target).__name__
+        raise NotImplementedError(f'Not implemented: {class_name}')
 
-            self.llvm_builder.position_at_end(llvm_else_block)
-            self.emit_statement(statement.else_statement)
+    def write_bounded_field(self, value: BoundedField, source: Value):
+        self.write_bounded_value(value.instance)
+        self.stream.write(f'set_{value.field.name}({self.get_value(source)})')
 
-            llvm_next_block = self.llvm_builder.append_basic_block('while.next')
-            if not self.llvm_builder.block.is_terminated:
-                self.llvm_builder.branch(llvm_next_block)
 
-            self.llvm_builder.position_at_end(llvm_continue_block)
-            llvm_flag = self.llvm_builder.load(llvm_flag)
-            self.llvm_builder.cbranch(llvm_flag, llvm_else_block, llvm_next_block)
+class ValueSourceWriter(ValueWriter):
+    def write_value(self, value: Value):
+        if isinstance(value, BoundedField):
+            return self.write_bounded_field(value)
+        elif isinstance(value, StringConstant):
+            return self.write_string(value)
+        elif isinstance(value, IntegerConstant):
+            return self.write_integer(value)
+        elif isinstance(value, Parameter):
+            return self.write_parameter(value)
+        elif isinstance(value, NewInstruction):
+            return self.write_new_inst(value)
 
-            self.llvm_builder.position_at_end(llvm_next_block)
+        class_name = type(value).__name__
+        raise NotImplementedError(f'Not implemented: {class_name}')
+
+    def write_bounded_field(self, value: BoundedField):
+        self.write_bounded_value(value.instance)
+        self.stream.write(f'get_{value.field.name}()')
+
+    def write_integer(self, value: IntegerConstant):
+        self.stream.write(str(value.value))
+
+    def write_string(self, value: StringConstant):
+        self.stream.write('"')
+        self.stream.write(str(value.value).replace('"', '\\"'))
+        self.stream.write('"')
+
+    def write_parameter(self, value: Parameter):
+        if self.is_self_argument(value):
+            self.stream.write('this')
         else:
-            self.llvm_builder.position_at_end(llvm_continue_block)
+            self.stream.write(value.name)
 
-        return False
-
-    @multimethod
-    def emit_statement(self, statement: AssignStatement) -> bool:
-        llvm_source = self.emit_value(statement.source)
-        llvm_target = self.emit_target(statement.target)
-        self.llvm_builder.store(llvm_source, llvm_target)
-        return False
-
-    @multimethod
-    def emit_value(self, value: Value):
-        raise Diagnostic(value.location, DiagnosticSeverity.Error, "Not implemented value conversion to LLVM")
-
-    @multimethod
-    def emit_value(self, value: Parameter):
-        llvm_alloca = self.llvm_variables[value]
-        return self.llvm_builder.load(llvm_alloca)
-
-    @multimethod
-    def emit_value(self, value: Variable):
-        llvm_alloca = self.llvm_variables[value]
-        return self.llvm_builder.load(llvm_alloca)
-
-    @multimethod
-    def emit_value(self, value: BoundedField):
-        llvm_offset = self.emit_offset(value)
-        return self.llvm_builder.load(llvm_offset)
-
-    @multimethod
-    def emit_value(self, value: IntegerConstant):
-        llvm_type = self.llvm_types[value.type]
-        return ir.Constant(llvm_type, value.value)
-
-    @multimethod
-    def emit_value(self, value: BooleanConstant):
-        llvm_type = self.llvm_types[value.type]
-        return ir.Constant(llvm_type, value.value)
-
-    @multimethod
-    def emit_value(self, value: CallInstruction):
-        emitter = self.parent.builtins.emitters.get(value.function)
-        if emitter:
-            return emitter(self, value.function, value.arguments, value.location)
-
-        llvm_args = [self.emit_value(arg) for arg in value.arguments]
-        llvm_func = self.llvm_functions[value.function]
-        return self.llvm_builder.call(llvm_func, llvm_args)
-
-    @multimethod
-    def emit_value(self, value: NewInstruction):
-        if value.arguments:
-            raise Diagnostic(value.location, DiagnosticSeverity.Error, "Not implemented constructors")
-
-        llvm_type = self.llvm_types[value.type]
-        if value.type.is_pointer:
-            # allocate memory for type from heap (GC in future)
-            llvm_size = self.emit_sizeof(value.type)
-            llvm_instance = self.llvm_builder.call(self.parent.llvm_malloc, [llvm_size])
-            llvm_instance = self.llvm_builder.bitcast(llvm_instance, self.parent.llvm_types[value.type])
-            return llvm_instance
-        else:
-            return ir.Constant(llvm_type, None)
-
-    @multimethod
-    def emit_target(self, value: TargetValue):
-        raise Diagnostic(value.location, DiagnosticSeverity.Error, "Not implemented target conversion to LLVM")
-
-    @multimethod
-    def emit_target(self, value: Parameter):
-        return self.llvm_variables[value]
-
-    @multimethod
-    def emit_target(self, value: Variable):
-        return self.llvm_variables[value]
-
-    @multimethod
-    def emit_target(self, value: BoundedField):
-        return self.emit_offset(value)
-
-    def emit_offset(self, value: BoundedField):
-        index = cast(ClassType, value.instance.type).fields.index(value.field)
-        llvm_instance = self.emit_value(value.instance)
-
-        return self.llvm_builder.gep(llvm_instance, [
-            ir.Constant(ir.IntType(32), 0),
-            ir.Constant(ir.IntType(32), index),
-        ])
+    def write_new_inst(self, value: NewInstruction):
+        if isinstance(value.type, ClassType):
+            self.stream.write(f'new {self.get_type_name(value.type)}')
+        elif isinstance(value.type, StructType):
+            self.stream.write(f'{self.get_type_name(value.type)}')
+        self.stream.write('(')
+        self.write_arguments(value.arguments)
+        self.stream.write(')')
 
 
-class BuiltinsCodegen:
-    def __init__(self, parent: ModuleCodegen):
-        builtins_module = parent.context.builtins_module
-        integer_type = parent.context.integer_type
+class HeaderWriter(Writer):
+    def write_module(self, module: Module):
+        self.write_pragma('once')
+        self.stream.write_line()
 
-        self.emitters = {
-            integer_type.scope.resolve('__pos__').functions[0]: self.int_pos,
-            integer_type.scope.resolve('__neg__').functions[0]: self.int_neg,
-            integer_type.scope.resolve('__add__').functions[0]: self.int_add,
-            integer_type.scope.resolve('__sub__').functions[0]: self.int_sub,
-            integer_type.scope.resolve('__mul__').functions[0]: self.int_mul,
-        }
+        self.write_include('cstdint', is_system=True)
+        self.write_include('string', is_system=True)
+        self.write_include('vector', is_system=True)
 
-    @staticmethod
-    def int_pos(self: FunctionCodegen, func: Function, arguments: Sequence[Value], location: Location):
-        return self.emit_value(arguments[0])
+        for dependency in module.dependencies:
+            self.write_include(dependency.name + '.hpp')
 
-    @staticmethod
-    def int_neg(self: FunctionCodegen, func: Function, arguments: Sequence[Value], location: Location):
-        return self.llvm_builder.neg(self.emit_value(arguments[0]))
+        self.stream.write_line()
+        self.stream.write_line(f"namespace {self.get_module_name(module)} {{")
 
-    @staticmethod
-    def int_add(self: FunctionCodegen, func: Function, arguments: Sequence[Value], location: Location):
-        llvm_args = (self.emit_value(arg) for arg in arguments)
-        return self.llvm_builder.add(*llvm_args)
+        writer = ModuleMemberHeaderWriter(self.stream)
+        for member in module.members:
+            writer.write_member(member)
 
-    @staticmethod
-    def int_sub(self: FunctionCodegen, func: Function, arguments: Sequence[Value], location: Location):
-        llvm_args = (self.emit_value(arg) for arg in arguments)
-        return self.llvm_builder.sub(*llvm_args)
+        self.stream.write_line('}')
 
-    @staticmethod
-    def int_mul(self: FunctionCodegen, func: Function, arguments: Sequence[Value], location: Location):
-        llvm_args = (self.emit_value(arg) for arg in arguments)
-        return self.llvm_builder.mul(*llvm_args)
+
+class SourceWriter(Writer):
+    def write_module(self, module: Module):
+        self.write_include(module.name + '.hpp')
+        self.stream.write_line()
+
+        writer = ModuleMemberSourceWriter(self.stream)
+        for member in module.members:
+            writer.write_member(member)

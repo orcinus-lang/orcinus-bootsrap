@@ -333,7 +333,11 @@ class SemanticModel:
 
     @multimethod
     def annotate_scope(self, node: EnumAST) -> LexicalScope:
-        return LexicalScope(self.scopes[node.parent])
+        parent = self.scopes[node.parent]
+        if node in self.scopes:
+            return self.scopes[node]
+
+        return LexicalScope(name=node.name, parent=parent, location=node.location)
 
     def import_symbols(self, node: ModuleAST):
         """ Import symbols from imported scopes """
@@ -387,6 +391,10 @@ class SemanticModel:
         scope.define(node.name, node)
 
     @multimethod
+    def define_symbol(self, scope: LexicalScope, node: EnumMemberAST):
+        scope.define(node.name, node)
+
+    @multimethod
     def resolve_type(self, node: TypeAST) -> Type:
         self.diagnostics.error(node.location, "Not implemented type resolving")
         return ErrorType(self.module, node.location)
@@ -424,6 +432,9 @@ class SemanticModel:
 
     def annotate_generics(self, parameters: Sequence[GenericParameterAST]) -> Sequence[GenericParameter]:
         return [self.symbols[generic_node] for generic_node in parameters]
+
+    def annotate_parents(self, parents: Sequence[TypeAST]) -> Sequence[Type]:
+        return [self.types[parent] for parent in parents]
 
     @multimethod
     def annotate_symbol(self, _: SyntaxNode) -> None:
@@ -475,18 +486,23 @@ class SemanticModel:
         if node in self.symbols:
             return self.symbols[node]
 
-        if self.module == self.context.builtins_module:
-            if node.name == "int":
-                return IntegerType(parent, node.location)
-            elif node.name == "bool":
-                return BooleanType(parent, node.location)
-            elif node.name == "void":
-                return VoidType(parent, node.location)
-
         attributes = self.annotate_attributes(node.attributes)
         generic_parameters = self.annotate_generics(node.generic_parameters)
+        parents = self.annotate_parents(node.parents)
+
+        if self.module == self.context.builtins_module:
+            if node.name == "int":
+                assert not generic_parameters
+                return IntegerType(parent, node.location, attributes=attributes, parents=parents)
+            elif node.name == "bool":
+                assert not generic_parameters
+                return BooleanType(parent, node.location, attributes=attributes, parents=parents)
+            elif node.name == "void":
+                assert not generic_parameters
+                return VoidType(parent, node.location, attributes=attributes, parents=parents)
+
         return StructType(parent, node.name, node.location, generic_parameters=generic_parameters,
-                          attributes=attributes)
+                          attributes=attributes, parents=parents)
 
     @multimethod
     def annotate_symbol(self, node: ClassAST) -> Type:
@@ -494,13 +510,16 @@ class SemanticModel:
         if node in self.symbols:
             return self.symbols[node]
 
-        if self.module == self.context.builtins_module:
-            if node.name == "str":
-                return StringType(parent, node.location)
-
         attributes = self.annotate_attributes(node.attributes)
         generic_parameters = self.annotate_generics(node.generic_parameters)
-        return ClassType(parent, node.name, node.location, generic_parameters=generic_parameters, attributes=attributes)
+        parents = self.annotate_parents(node.parents)
+
+        if self.module == self.context.builtins_module:
+            if node.name == "str":
+                assert not generic_parameters
+                return StringType(parent, node.location, parents=parents, attributes=attributes)
+        return ClassType(parent, node.name, node.location, parents=parents, generic_parameters=generic_parameters,
+                         attributes=attributes)
 
     @multimethod
     def annotate_symbol(self, node: InterfaceAST) -> Type:
@@ -510,8 +529,10 @@ class SemanticModel:
 
         attributes = self.annotate_attributes(node.attributes)
         generic_parameters = self.annotate_generics(node.generic_parameters)
+        parents = self.annotate_parents(node.parents)
+
         return InterfaceType(parent, node.name, node.location, generic_parameters=generic_parameters,
-                             attributes=attributes)
+                             attributes=attributes, parents=parents)
 
     @multimethod
     def annotate_symbol(self, node: EnumAST) -> Type:
@@ -520,7 +541,10 @@ class SemanticModel:
             return self.symbols[node]
 
         attributes = self.annotate_attributes(node.attributes)
-        return EnumType(parent, node.name, node.location, attributes=attributes)
+        parents = self.annotate_parents(node.parents)
+
+        attributes = self.annotate_attributes(node.attributes)
+        return EnumType(parent, node.name, node.location, attributes=attributes, parents=parents)
 
     @multimethod
     def annotate_symbol(self, node: GenericParameterAST) -> GenericType:
@@ -532,12 +556,24 @@ class SemanticModel:
         if node in self.symbols:
             return self.symbols[node]
 
-        if not isinstance(parent, Type):
-            self.diagnostics.error(node.location, "Field member must be declared in type")
+        if not isinstance(parent, (InterfaceType, ClassType, StructType)):
+            self.diagnostics.error(node.location, "Field member must be declared in struct, class or interface type")
             return ErrorSymbol(self.module, node.location)
 
         field_type = self.types[node.type]
         return Field(cast(Type, parent), node.name, field_type, node.location)
+
+    @multimethod
+    def annotate_symbol(self, node: EnumMemberAST) -> Symbol:
+        parent = self.symbols[node.parent]
+        if node in self.symbols:
+            return self.symbols[node]
+
+        if not isinstance(parent, EnumType):
+            self.diagnostics.error(node.location, "Enum member must be declared in enumeration type")
+            return ErrorSymbol(self.module, node.location)
+        value = None if isinstance(node.value, EllipsisExpressionAST) else self.emit_value(node.value)
+        return EnumConstant(parent, node.name, value, node.location)
 
     @multimethod
     def initialize_symbol(self, node: SyntaxNode):
@@ -1572,7 +1608,7 @@ class Type(MangledSymbol, GenericSymbol, OwnedSymbol, ContainerSymbol, abc.ABC):
     """ Abstract base for all types """
 
     def __init__(self, owner: ContainerSymbol, name: str, location: Location, *,
-                 attributes=None, generic_parameters=None, generic_arguments=None, definition=None):
+                 attributes=None, generic_parameters=None, generic_arguments=None, definition=None, parents=None):
         super(Type, self).__init__()
 
         self.__owner = owner
@@ -1582,6 +1618,7 @@ class Type(MangledSymbol, GenericSymbol, OwnedSymbol, ContainerSymbol, abc.ABC):
         self.__generic_parameters = tuple(generic_parameters or [])
         self.__generic_arguments = tuple(generic_arguments or [])
         self.__definition = definition
+        self.__parents = tuple(parents or [])
 
         self.module.add_type(self)
 
@@ -1626,6 +1663,10 @@ class Type(MangledSymbol, GenericSymbol, OwnedSymbol, ContainerSymbol, abc.ABC):
     def methods(self) -> Sequence[Function]:
         return [member for member in self.members if isinstance(member, Function)]
 
+    @property
+    def parents(self) -> Sequence[Type]:
+        return self.__parents
+
     def __hash__(self):
         return id(self)
 
@@ -1647,23 +1688,23 @@ class ErrorType(Type):
 
 
 class VoidType(Type):
-    def __init__(self, owner: ContainerSymbol, location: Location):
-        super(VoidType, self).__init__(owner, 'void', location)
+    def __init__(self, owner: ContainerSymbol, location: Location, **kwargs):
+        super(VoidType, self).__init__(owner, 'void', location, **kwargs)
 
 
 class BooleanType(Type):
-    def __init__(self, owner: ContainerSymbol, location: Location):
-        super(BooleanType, self).__init__(owner, 'bool', location)
+    def __init__(self, owner: ContainerSymbol, location: Location, **kwargs):
+        super(BooleanType, self).__init__(owner, 'bool', location, **kwargs)
 
 
 class StringType(Type):
-    def __init__(self, owner: ContainerSymbol, location: Location):
-        super(StringType, self).__init__(owner, 'str', location)
+    def __init__(self, owner: ContainerSymbol, location: Location, **kwargs):
+        super(StringType, self).__init__(owner, 'str', location, **kwargs)
 
 
 class IntegerType(Type):
-    def __init__(self, owner: ContainerSymbol, location: Location):
-        super(IntegerType, self).__init__(owner, 'int', location)
+    def __init__(self, owner: ContainerSymbol, location: Location, **kwargs):
+        super(IntegerType, self).__init__(owner, 'int', location, **kwargs)
 
 
 class ClassType(Type):
@@ -1722,7 +1763,9 @@ class InterfaceType(Type):
 
 
 class EnumType(Type):
-    pass
+    @property
+    def values(self) -> Sequence[EnumConstant]:
+        return tuple(member for member in self.members if isinstance(member, EnumConstant))
 
 
 class FunctionType(Type):
@@ -2070,6 +2113,22 @@ class StringConstant(Value):
     def __str__(self):
         value = self.value.replace('"', '\\"')
         return f'"{value}"'
+
+
+class EnumConstant(OwnedSymbol, Value):
+    def __init__(self, owner: EnumType, name: str, value: Optional[int], location: Location):
+        super(EnumConstant, self).__init__(owner, location)
+
+        self.__name = name
+        self.value = value
+
+    @property
+    def name(self) -> str:
+        return self.__name
+
+    @property
+    def owner(self) -> ContainerSymbol:
+        raise self.owner
 
 
 class CallInstruction(Value):

@@ -548,6 +548,7 @@ class TypeDeclarationAST(MemberAST):
     tok_name: SyntaxToken
     members: Sequence[MemberAST]
     attributes: Sequence[AttributeAST]
+    parents: Sequence[TypeAST]
 
     @property
     def name(self) -> str:
@@ -565,7 +566,8 @@ class StructAST(TypeDeclarationAST):
 
     @property
     def children(self) -> Sequence[SyntaxSymbol]:
-        return self._cleanup(self.attributes, self.tok_struct, self.tok_name, self.generic_parameters, self.members)
+        return self._cleanup(self.attributes, self.tok_struct, self.tok_name, self.generic_parameters, self.parents,
+                             self.members)
 
 
 @dataclass(unsafe_hash=True, frozen=True)
@@ -575,7 +577,8 @@ class ClassAST(TypeDeclarationAST):
 
     @property
     def children(self) -> Sequence[SyntaxSymbol]:
-        return self._cleanup(self.attributes, self.tok_class, self.tok_name, self.generic_parameters, self.members)
+        return self._cleanup(self.attributes, self.tok_class, self.tok_name, self.generic_parameters, self.parents,
+                             self.members)
 
 
 @dataclass(unsafe_hash=True, frozen=True)
@@ -585,7 +588,8 @@ class InterfaceAST(TypeDeclarationAST):
 
     @property
     def children(self) -> Sequence[SyntaxSymbol]:
-        return self._cleanup(self.attributes, self.tok_interface, self.tok_name, self.generic_parameters, self.members)
+        return self._cleanup(self.attributes, self.tok_interface, self.tok_name, self.generic_parameters, self.parents,
+                             self.members)
 
 
 @dataclass(unsafe_hash=True, frozen=True)
@@ -595,7 +599,8 @@ class EnumAST(TypeDeclarationAST):
 
     @property
     def children(self) -> Sequence[SyntaxSymbol]:
-        return self._cleanup(self.attributes, self.tok_enum, self.tok_name, self.generic_parameters, self.members)
+        return self._cleanup(self.attributes, self.tok_enum, self.tok_name, self.generic_parameters, self.parents,
+                             self.members)
 
 
 @dataclass(unsafe_hash=True, frozen=True)
@@ -617,6 +622,27 @@ class FieldAST(MemberAST):
     @property
     def children(self) -> Sequence[SyntaxSymbol]:
         return [self.attributes, self.tok_name, self.tok_colon, self.type, self.tok_newline]
+
+
+@dataclass(unsafe_hash=True, frozen=True)
+class EnumMemberAST(MemberAST):
+    attributes: Sequence[AttributeAST]
+    tok_name: SyntaxToken
+    tok_equal: SyntaxToken
+    value: ExpressionAST
+    tok_newline: SyntaxToken
+
+    @property
+    def name(self) -> str:
+        return self.tok_name.value
+
+    @property
+    def location(self) -> Location:
+        return self.tok_name.location
+
+    @property
+    def children(self) -> Sequence[SyntaxSymbol]:
+        return [self.attributes, self.tok_name, self.tok_equal, self.value, self.tok_newline]
 
 
 @dataclass(unsafe_hash=True, frozen=True)
@@ -1048,3 +1074,16 @@ class TupleExpressionAST(ExpressionAST):
     @property
     def location(self) -> Location:
         return cast(SyntaxCollection, self.arguments).location
+
+
+@dataclass(unsafe_hash=True, frozen=True)
+class EllipsisExpressionAST(ExpressionAST):
+    tok_ellipsis: SyntaxToken
+
+    @property
+    def location(self) -> Location:
+        return self.tok_ellipsis.location
+
+    @property
+    def children(self) -> Sequence[SyntaxSymbol]:
+        return [self.tok_ellipsis]

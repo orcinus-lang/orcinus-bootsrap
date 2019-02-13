@@ -229,6 +229,23 @@ class Parser:
         self.consume(TokenID.RightSquare)
         return SyntaxCollection(self.context, arguments)
 
+    def parse_parents(self) -> Sequence[TypeAST]:
+        """
+        parents:
+            [ '(' [ type { ',' type} ] ')' ]
+        """
+        if not self.match(TokenID.LeftParenthesis):
+            return SyntaxCollection(self.context, location=self.previous_location)
+
+        arguments = [self.consume(TokenID.LeftParenthesis)]
+        if self.match(TokenID.Name):
+            arguments.append(self.parse_type())
+            while self.match(TokenID.Comma):
+                arguments.append(self.consume(TokenID.Comma))
+                arguments.append(self.parse_type())
+        arguments.append(self.consume(TokenID.RightParenthesis))
+        return SyntaxCollection(self.context, arguments)
+
     def parse_imports(self) -> Sequence[ImportAST]:
         """
         imports:
@@ -401,6 +418,7 @@ class Parser:
         tok_class = self.consume(TokenID.Class)
         tok_name = self.consume(TokenID.Name)
         generic_parameters = self.parse_generic_parameters()
+        parents = self.parse_parents()
         members = self.parse_type_members()
 
         # noinspection PyArgumentList
@@ -408,6 +426,7 @@ class Parser:
                         attributes=attributes,
                         tok_class=tok_class,
                         tok_name=tok_name,
+                        parents=parents,
                         generic_parameters=generic_parameters,
                         members=members
                         )
@@ -420,6 +439,7 @@ class Parser:
         tok_struct = self.consume(TokenID.Struct)
         tok_name = self.consume(TokenID.Name)
         generic_parameters = self.parse_generic_parameters()
+        parents = self.parse_parents()
         members = self.parse_type_members()
 
         # noinspection PyArgumentList
@@ -427,6 +447,7 @@ class Parser:
                          attributes=attributes,
                          tok_struct=tok_struct,
                          tok_name=tok_name,
+                         parents=parents,
                          generic_parameters=generic_parameters,
                          members=members,
                          )
@@ -439,6 +460,7 @@ class Parser:
         tok_interface = self.consume(TokenID.Interface)
         tok_name = self.consume(TokenID.Name)
         generic_parameters = self.parse_generic_parameters()
+        parents = self.parse_parents()
         members = self.parse_type_members()
 
         # noinspection PyArgumentList
@@ -446,6 +468,7 @@ class Parser:
                             attributes=attributes,
                             tok_interface=tok_interface,
                             tok_name=tok_name,
+                            parents=parents,
                             generic_parameters=generic_parameters,
                             members=members,
                             )
@@ -458,6 +481,7 @@ class Parser:
         tok_enum = self.consume(TokenID.Enum)
         tok_name = self.consume(TokenID.Name)
         generic_parameters = self.parse_generic_parameters()
+        parents = self.parse_parents()
         members = self.parse_type_members()
 
         # noinspection PyArgumentList
@@ -465,6 +489,7 @@ class Parser:
                        attributes=attributes,
                        tok_enum=tok_enum,
                        tok_name=tok_name,
+                       parents=parents,
                        generic_parameters=generic_parameters,
                        members=members,
                        )
@@ -500,9 +525,21 @@ class Parser:
     def parse_named_member(self, attributes: Sequence[AttributeAST]) -> FieldAST:
         """
         named_member:
-            Name ':' type
+            field_member
         """
         tok_name = self.consume(TokenID.Name)
+        if self.match(TokenID.Colon):
+            return self.parse_field_member(tok_name, attributes)
+        elif self.match(TokenID.Equal):
+            return self.parse_enum_member(tok_name, attributes)
+
+        self.consume(TokenID.Colon, TokenID.Equal)
+
+    def parse_field_member(self, tok_name: SyntaxToken, attributes: Sequence[AttributeAST]) -> FieldAST:
+        """
+        field_member:
+            Name ':' type
+        """
         tok_colon = self.consume(TokenID.Colon)
         field_type = self.parse_type()
         tok_newline = self.consume(TokenID.NewLine)
@@ -515,6 +552,33 @@ class Parser:
                         type=field_type,
                         tok_newline=tok_newline
                         )
+
+    def parse_enum_member(self, tok_name: SyntaxToken, attributes: Sequence[AttributeAST]) -> FieldAST:
+        """
+        enum_member:
+            Name '=' expression
+            Name '=' '...'
+        """
+        tok_equal = self.consume(TokenID.Equal)
+
+        if self.match(TokenID.Ellipsis):
+            value = self.parse_ellipsis_expression()
+        elif self.match(*self.EXPRESSION_STARTS):
+            value = self.parse_expression()
+        else:
+            self.consume(TokenID.Ellipsis, *self.EXPRESSION_STARTS)
+
+        tok_newline = self.consume(TokenID.NewLine)
+
+        # noinspection PyArgumentList
+        return EnumMemberAST(
+            context=self.context,
+            attributes=attributes,
+            tok_name=tok_name,
+            tok_equal=tok_equal,
+            value=value,
+            tok_newline=tok_newline
+        )
 
     def parse_function(self, attributes: Sequence[AttributeAST]) -> FunctionAST:
         """
@@ -833,7 +897,8 @@ class Parser:
             targets.append(self.parse_expression())
 
         return targets[0] if len(targets) == 1 else TupleExpressionAST(context=self.context,
-                                                                       arguments=SyntaxCollection(self.context, targets))
+                                                                       arguments=SyntaxCollection(self.context,
+                                                                                                  targets))
 
     def parse_expression_list(self) -> ExpressionAST:
         """
@@ -849,7 +914,8 @@ class Parser:
                 break
 
         return expressions[0] if len(expressions) == 1 else TupleExpressionAST(context=self.context,
-                                                                               arguments=SyntaxCollection(self.context, expressions))
+                                                                               arguments=SyntaxCollection(self.context,
+                                                                                                          expressions))
 
     def parse_expression(self) -> ExpressionAST:
         """
@@ -1192,3 +1258,11 @@ class Parser:
         expression = self.parse_expression()
         self.consume(TokenID.RightParenthesis)
         return expression
+
+    def parse_ellipsis_expression(self) -> ExpressionAST:
+        """
+        ellipsis_expression:
+            '...'
+        """
+        tok_ellipsis = self.consume(TokenID.Ellipsis)
+        return EllipsisExpressionAST(context=self.context, tok_ellipsis=tok_ellipsis)

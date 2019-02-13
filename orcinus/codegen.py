@@ -85,6 +85,13 @@ class Writer:
 
 
 class MemberWriter(Writer):
+    def write_parents(self, parents: Sequence[Type]):
+        self.stream.write_line(' : ')
+        for idx, parent in enumerate(parents):
+            if idx:
+                self.stream.write(', ')
+            self.stream.write(f'public {self.get_type_name(parent)}')
+
     def write_member(self, symbol: Symbol):
         if isinstance(symbol, Type):
             return self.write_type(symbol)
@@ -134,7 +141,9 @@ class MemberHeaderWriter(MemberWriter):
 
     def write_class(self, member: ClassType):
         writer = ClassMemberHeaderWriter(self.stream)
-        self.stream.write_line(f'class {member.name} {{')
+        self.stream.write(f'class {member.name}')
+        self.write_parents(member.parents)
+        self.stream.write_line('{')
         self.stream.write_line('public:')
         self.stream.write_line(f'{member.name}(const {member.name}&) =delete;')
         self.stream.write_line(f'{member.name}& operator=(const {member.name}&) =delete;')
@@ -145,7 +154,9 @@ class MemberHeaderWriter(MemberWriter):
 
     def write_struct(self, member: StructType):
         writer = StructMemberHeaderWriter(self.stream)
-        self.stream.write_line(f'class {member.name} {{')
+        self.stream.write(f'class {member.name}')
+        self.write_parents(member.parents)
+        self.stream.write_line('{')
         self.stream.write_line('public:')
 
         for member in member.members:
@@ -153,8 +164,10 @@ class MemberHeaderWriter(MemberWriter):
         self.stream.write_line('};')
 
     def write_interface(self, member: InterfaceType):
-        writer = ClassMemberHeaderWriter(self.stream)
-        self.stream.write_line(f'class {member.name} {{')
+        writer = InterfaceMemberHeaderWriter(self.stream)
+        self.stream.write(f'class {member.name}')
+        self.write_parents(member.parents)
+        self.stream.write_line('{')
         self.stream.write_line('public:')
 
         self.stream.write_line(f'{member.name}(const {member.name}&) =delete;')
@@ -165,7 +178,16 @@ class MemberHeaderWriter(MemberWriter):
         self.stream.write_line('};')
 
     def write_enum(self, member: EnumType):
-        raise NotImplementedError
+        writer = TypeMemberHeaderWriter(self.stream)
+        self.stream.write_line(f'enum class {member.name} {{')
+        for idx, member in enumerate(member.values):
+            if idx:
+                self.stream.write(', ')
+            if member.value:
+                self.stream.write(f'{member.name} = {self.get_value(member.value)}')
+            else:
+                self.stream.write(member.name)
+        self.stream.write_line('};')
 
     def write_field(self, symbol: Field):
         raise NotImplementedError
@@ -189,6 +211,13 @@ class TypeMemberHeaderWriter(MemberHeaderWriter):
 
     def write_constructor(self, symbol: Function):
         self.stream.write_line(f"{symbol.owner.name}({self.get_function_declaration(symbol, True)});")
+
+
+# noinspection PyAbstractClass
+class InterfaceMemberHeaderWriter(TypeMemberHeaderWriter):
+    def write_field(self, symbol: Field):
+        self.stream.write_line(f'virtual {self.get_type_name(symbol.type)} get_{symbol.name}() const =0;')
+        self.stream.write_line(f'virtual void set_{symbol.name}({self.get_type_name(symbol.type)} value)  =0;')
 
 
 # noinspection PyAbstractClass
@@ -228,9 +257,7 @@ class MemberSourceWriter(MemberWriter):
             writer.write_member(child)
 
     def write_enum(self, member: EnumType):
-        writer = ClassMemberSourceWriter(self.stream)
-        for child in member.members:
-            writer.write_member(child)
+        pass
 
     def write_interface(self, member: InterfaceType):
         writer = ClassMemberSourceWriter(self.stream)
@@ -384,6 +411,8 @@ class ValueSourceWriter(ValueWriter):
             return self.write_parameter(value)
         elif isinstance(value, NewInstruction):
             return self.write_new_inst(value)
+        elif isinstance(value, CallInstruction):
+            return self.write_call_inst(value)
 
         class_name = type(value).__name__
         raise NotImplementedError(f'Not implemented: {class_name}')
@@ -411,6 +440,15 @@ class ValueSourceWriter(ValueWriter):
             self.stream.write(f'new {self.get_type_name(value.type)}')
         elif isinstance(value.type, StructType):
             self.stream.write(f'{self.get_type_name(value.type)}')
+        self.stream.write('(')
+        self.write_arguments(value.arguments)
+        self.stream.write(')')
+
+    def write_call_inst(self, value: CallInstruction):
+        if value.function.name == '__neg__':
+            self.stream.write('-')
+        else:
+            self.stream.write(value.function.name)
         self.stream.write('(')
         self.write_arguments(value.arguments)
         self.stream.write(')')

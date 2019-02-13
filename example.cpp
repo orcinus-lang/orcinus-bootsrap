@@ -22,3 +22,8 @@
     this->set_begin(position);
     this->set_end(position);
 }
+::example::SyntaxToken::SyntaxToken(::example::TokenID id, std::string value, ::example::Location location) {
+    this->set_id(id);
+    this->set_value(value);
+    this->set_location(location);
+}
